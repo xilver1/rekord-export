@@ -1,8 +1,8 @@
 warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
 package:   C:\repos\rekord-export\rekordbox-cli\Cargo.toml
 workspace: C:\repos\rekord-export\Cargo.toml
-   0.082608300s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint: fingerprint error for rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)/Check { test: false }/TargetInner { name: "rbx", doc: true, ..: with_path("C:\\repos\\rekord-export\\rekordbox-cli\\src\\main.rs", Edition2021) }
-   0.082652900s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\repos\rekord-export\target\debug\.fingerprint\rekordbox-cli-fbdd6e27f8efb67d\bin-rbx`
+   0.091251700s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint: fingerprint error for rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)/Check { test: false }/TargetInner { name: "rbx", doc: true, ..: with_path("C:\\repos\\rekord-export\\rekordbox-cli\\src\\main.rs", Edition2021) }
+   0.091291700s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\repos\rekord-export\target\debug\.fingerprint\rekordbox-cli-fbdd6e27f8efb67d\bin-rbx`
 
 Caused by:
     The system cannot find the file specified. (os error 2)
@@ -29,8 +29,8 @@ Stack backtrace:
   18: git_midx_writer_dump
   19: BaseThreadInitThunk
   20: RtlUserThreadStart
-   0.102013700s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint: fingerprint error for rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)/Check { test: true }/TargetInner { name: "rbx", doc: true, ..: with_path("C:\\repos\\rekord-export\\rekordbox-cli\\src\\main.rs", Edition2021) }
-   0.102039700s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\repos\rekord-export\target\debug\.fingerprint\rekordbox-cli-9e1cceea4853f442\test-bin-rbx`
+   0.109710500s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint: fingerprint error for rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)/Check { test: true }/TargetInner { name: "rbx", doc: true, ..: with_path("C:\\repos\\rekord-export\\rekordbox-cli\\src\\main.rs", Edition2021) }
+   0.109736900s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\repos\rekord-export\target\debug\.fingerprint\rekordbox-cli-9e1cceea4853f442\test-bin-rbx`
 
 Caused by:
     The system cannot find the file specified. (os error 2)

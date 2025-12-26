@@ -6,7 +6,7 @@ A Rust-based system for analyzing music and generating Pioneer CDJ-compatible US
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Dell Wyse 5070 NAS (OpenMediaVault)                             │
+│ Server                             │
 │                                                                 │
 │  ┌──────────────────┐    ┌─────────────────────────────────┐   │
 │  │ rekordbox-server │◄───│ Music Files                     │   │
