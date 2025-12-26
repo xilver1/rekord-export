@@ -1,14 +1,13 @@
 //! Audio analysis pipeline
 //!
 //! Memory-efficient audio processing using Symphonia for decoding.
-//! Processes audio in chunks to minimize memory usage on the Dell Wyse.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::fs::File;
 
 use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -16,8 +15,10 @@ use symphonia::core::probe::Hint;
 use tracing::{info, warn, debug};
 use walkdir::WalkDir;
 
-use rekordbox_core::cache::{AnalysisCache, compute_file_hash};
-use rekordbox_core::track::*;
+use rekordbox_core::{
+    AnalysisCache, compute_file_hash,
+    TrackAnalysis, BeatGrid, Beat, Waveform, Key, FileType,
+};
 use crate::config::Config;
 use crate::waveform::WaveformGenerator;
 
@@ -51,7 +52,13 @@ pub async fn analyze_directory(
             .to_string();
         
         // Compute file hash for cache lookup
-        let file_hash = compute_file_hash(path)?;
+        let file_hash = match compute_file_hash(path) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("Failed to hash {:?}: {}", path, e);
+                continue;
+            }
+        };
         
         // Check cache first
         if let Some(mut cached) = cache.get(file_hash) {
@@ -67,7 +74,7 @@ pub async fn analyze_directory(
         info!("Analyzing: {:?}", path);
         
         // Analyze track
-        match analyze_track(path, track_id, file_hash).await {
+        match analyze_track(path, track_id, file_hash) {
             Ok(analysis) => {
                 // Cache the result
                 if let Err(e) = cache.put(&analysis) {
@@ -90,7 +97,7 @@ pub async fn analyze_directory(
 }
 
 /// Analyze a single audio track
-async fn analyze_track(
+fn analyze_track(
     path: &Path,
     track_id: u32,
     file_hash: u64,
@@ -120,9 +127,6 @@ async fn analyze_track(
     
     let sample_rate = track.codec_params.sample_rate
         .ok_or_else(|| anyhow::anyhow!("Unknown sample rate"))?;
-    let channels = track.codec_params.channels
-        .map(|c| c.count())
-        .unwrap_or(2);
     let bit_depth = track.codec_params.bits_per_sample.unwrap_or(16);
     
     // Create decoder
@@ -132,19 +136,22 @@ async fn analyze_track(
     )?;
     
     // Extract metadata
-    let (title, artist, album, genre) = extract_metadata(&mut format, path);
+    let (title, artist, album, genre, year, track_number) = extract_metadata(&mut format, path);
+    
+    // Get file type
+    let file_type = path.extension()
+        .and_then(|e| e.to_str())
+        .map(FileType::from_extension)
+        .unwrap_or_default();
     
     // Collect samples for analysis (downsample to mono float)
-    // Process in chunks to limit memory usage
     let mut samples: Vec<f32> = Vec::new();
     let mut total_samples = 0u64;
     
-    // Memory limit: ~50MB of samples (12.5M samples at 4 bytes each)
-    // At 44.1kHz, that's ~4.7 minutes of audio for BPM detection
-    // For longer tracks, we'll analyze a representative section
+    // Memory limit: ~50MB of samples
     const MAX_SAMPLES: usize = 12_500_000;
     
-    while samples.len() < MAX_SAMPLES {
+    loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e)) 
@@ -152,11 +159,16 @@ async fn analyze_track(
             Err(e) => return Err(e.into()),
         };
         
+        if packet.track_id() != track.id {
+            continue;
+        }
+        
         let decoded = decoder.decode(&packet)?;
         total_samples += decoded.frames() as u64;
         
-        // Convert to mono f32
-        append_as_mono_f32(&decoded, &mut samples);
+        if samples.len() < MAX_SAMPLES {
+            append_as_mono_f32(&decoded, &mut samples);
+        }
     }
     
     let duration_secs = total_samples as f64 / sample_rate as f64;
@@ -166,8 +178,8 @@ async fn analyze_track(
     let bpm = detect_bpm(&samples, sample_rate)?;
     info!("Detected BPM: {:.1}", bpm);
     
-    // Key detection (placeholder - needs implementation)
-    let key = detect_key(&samples, sample_rate);
+    // Key detection (TODO: implement properly)
+    let key = None;
     
     // Generate beat grid
     let first_beat_ms = detect_first_beat(&samples, sample_rate, bpm);
@@ -178,10 +190,10 @@ async fn analyze_track(
     let waveform = waveform_gen.generate(&samples, duration_secs);
     
     // Build relative file path for database
-    let file_path = path.file_name()
+    let file_name = path.file_name()
         .and_then(|n| n.to_str())
-        .map(|n| format!("Contents/{}", n))
-        .unwrap_or_default();
+        .unwrap_or("unknown");
+    let file_path = format!("/Contents/{}", file_name);
     
     let file_size = std::fs::metadata(path)?.len();
     
@@ -201,10 +213,14 @@ async fn analyze_track(
         waveform,
         file_size,
         file_hash,
+        year,
+        comment: None,
+        track_number,
+        file_type,
     })
 }
 
-/// Convert decoded audio to mono f32, appending to buffer
+/// Convert decoded audio to mono f32
 fn append_as_mono_f32(buffer: &AudioBufferRef, output: &mut Vec<f32>) {
     match buffer {
         AudioBufferRef::F32(buf) => {
@@ -238,26 +254,32 @@ fn append_as_mono_f32(buffer: &AudioBufferRef, output: &mut Vec<f32>) {
             }
         }
         _ => {
-            // Handle other formats by iterating
             debug!("Unsupported sample format, skipping");
         }
     }
 }
 
 /// Detect BPM using autocorrelation
-/// This is a simplified implementation - consider stratum-dsp for production
 fn detect_bpm(samples: &[f32], sample_rate: u32) -> anyhow::Result<f64> {
+    if samples.is_empty() {
+        return Ok(120.0); // Default
+    }
+    
     // Use first ~30 seconds for BPM detection
     let analysis_samples = std::cmp::min(samples.len(), (sample_rate * 30) as usize);
     let samples = &samples[..analysis_samples];
     
-    // Simple onset detection via envelope following
+    // Onset detection via envelope following
     let hop_size = sample_rate as usize / 100; // 10ms hops
     let mut envelope = Vec::new();
     
     for chunk in samples.chunks(hop_size) {
         let rms: f32 = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
         envelope.push(rms);
+    }
+    
+    if envelope.is_empty() {
+        return Ok(120.0);
     }
     
     // Normalize envelope
@@ -277,7 +299,7 @@ fn detect_bpm(samples: &[f32], sample_rate: u32) -> anyhow::Result<f64> {
     let mut best_bpm = 120.0;
     let mut best_correlation = 0.0f32;
     
-    for lag in min_lag..=max_lag {
+    for lag in min_lag..=max_lag.min(envelope.len() - 1) {
         let mut correlation = 0.0f32;
         let count = envelope.len() - lag;
         
@@ -288,26 +310,22 @@ fn detect_bpm(samples: &[f32], sample_rate: u32) -> anyhow::Result<f64> {
         
         if correlation > best_correlation {
             best_correlation = correlation;
-            let bpm = env_rate * 60.0 / lag as f64;
-            best_bpm = bpm;
+            best_bpm = env_rate * 60.0 / lag as f64;
         }
     }
     
-    // Round to common BPM values
-    let rounded = (best_bpm * 2.0).round() / 2.0; // Round to 0.5 BPM
+    // Round to 0.5 BPM precision
+    let rounded = (best_bpm * 2.0).round() / 2.0;
     
     Ok(rounded)
 }
 
-/// Detect musical key (placeholder - needs full implementation)
-fn detect_key(_samples: &[f32], _sample_rate: u32) -> Option<Key> {
-    // TODO: Implement chromagram-based key detection
-    // For now, return None
-    None
-}
-
 /// Find first beat position in milliseconds
 fn detect_first_beat(samples: &[f32], sample_rate: u32, bpm: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    
     // Look for first significant onset in first few seconds
     let search_samples = std::cmp::min(samples.len(), (sample_rate * 5) as usize);
     let hop_size = sample_rate as usize / 200; // 5ms hops
@@ -322,6 +340,10 @@ fn detect_first_beat(samples: &[f32], sample_rate: u32, bpm: f64) -> f64 {
         prev_energy = energy;
     }
     
+    if onset_strength.is_empty() {
+        return 0.0;
+    }
+    
     // Find first strong onset
     let threshold = onset_strength.iter().cloned().fold(0.0f32, f32::max) * 0.3;
     
@@ -332,7 +354,6 @@ fn detect_first_beat(samples: &[f32], sample_rate: u32, bpm: f64) -> f64 {
         }
     }
     
-    // Default: beat at start
     0.0
 }
 
@@ -340,7 +361,7 @@ fn detect_first_beat(samples: &[f32], sample_rate: u32, bpm: f64) -> f64 {
 fn extract_metadata(
     format: &mut Box<dyn symphonia::core::formats::FormatReader>,
     path: &Path,
-) -> (String, String, Option<String>, Option<String>) {
+) -> (String, String, Option<String>, Option<String>, Option<u16>, Option<u32>) {
     let mut title = path.file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("Unknown")
@@ -348,6 +369,8 @@ fn extract_metadata(
     let mut artist = "Unknown Artist".to_string();
     let mut album = None;
     let mut genre = None;
+    let mut year = None;
+    let mut track_number = None;
     
     // Try to get metadata from format
     if let Some(metadata) = format.metadata().current() {
@@ -365,12 +388,23 @@ fn extract_metadata(
                 Some(symphonia::core::meta::StandardTagKey::Genre) => {
                     genre = Some(tag.value.to_string());
                 }
+                Some(symphonia::core::meta::StandardTagKey::Date) => {
+                    // Try to parse year
+                    if let Ok(y) = tag.value.to_string().get(..4).unwrap_or("").parse::<u16>() {
+                        year = Some(y);
+                    }
+                }
+                Some(symphonia::core::meta::StandardTagKey::TrackNumber) => {
+                    if let Ok(n) = tag.value.to_string().parse::<u32>() {
+                        track_number = Some(n);
+                    }
+                }
                 _ => {}
             }
         }
     }
     
-    (title, artist, album, genre)
+    (title, artist, album, genre, year, track_number)
 }
 
 /// Check if path is a supported audio file

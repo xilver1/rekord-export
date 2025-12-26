@@ -1,17 +1,16 @@
 //! Analysis cache using filesystem storage
 //!
-//! Stores analysis results on disk (SSD) keyed by file hash.
-//! This is critical for memory-constrained environments like the Dell Wyse.
+//! Stores analysis results on disk keyed by file hash.
+//! This is critical for memory-constrained environments.
 
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::track::TrackAnalysis;
 use crate::error::{Error, Result};
+use crate::track::TrackAnalysis;
 
 /// File-based cache for track analysis results
 pub struct AnalysisCache {
@@ -26,7 +25,7 @@ impl AnalysisCache {
         Ok(Self { cache_dir })
     }
     
-    /// Generate a cache key from file path and content hash
+    /// Generate a cache key from file hash
     fn cache_key(file_hash: u64) -> String {
         format!("{:016x}.json", file_hash)
     }
@@ -52,8 +51,7 @@ impl AnalysisCache {
         
         let file = File::create(&path)?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer(writer, analysis)
-            .map_err(|e| Error::Cache(e.to_string()))?;
+        serde_json::to_writer(writer, analysis)?;
         
         Ok(())
     }
@@ -100,6 +98,7 @@ impl AnalysisCache {
     }
 }
 
+/// Cache statistics
 #[derive(Debug, Clone)]
 pub struct CacheStats {
     pub entry_count: usize,
@@ -107,7 +106,7 @@ pub struct CacheStats {
 }
 
 /// Compute file hash for cache invalidation
-/// Uses XXH3 on a sample of the file (first 1MB + size) for speed
+/// Uses XXH3 on a sample of the file (first 1MB + file size) for speed
 pub fn compute_file_hash<P: AsRef<Path>>(path: P) -> Result<u64> {
     let metadata = fs::metadata(&path)?;
     let file_size = metadata.len();
@@ -117,7 +116,7 @@ pub fn compute_file_hash<P: AsRef<Path>>(path: P) -> Result<u64> {
     let mut sample = vec![0u8; sample_size + 8];
     
     let mut file = File::open(&path)?;
-    std::io::Read::read_exact(&mut file, &mut sample[..sample_size])?;
+    file.read_exact(&mut sample[..sample_size])?;
     
     // Append file size to sample for uniqueness
     sample[sample_size..].copy_from_slice(&file_size.to_le_bytes());
@@ -128,16 +127,11 @@ pub fn compute_file_hash<P: AsRef<Path>>(path: P) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::track::*;
     use tempfile::TempDir;
     
-    #[test]
-    fn test_cache_roundtrip() {
-        let tmp = TempDir::new().unwrap();
-        let cache = AnalysisCache::new(tmp.path()).unwrap();
-        
-        // Create a minimal analysis
-        use crate::track::*;
-        let analysis = TrackAnalysis {
+    fn make_test_analysis() -> TrackAnalysis {
+        TrackAnalysis {
             id: 1,
             file_path: "test.mp3".into(),
             title: "Test Track".into(),
@@ -149,18 +143,23 @@ mod tests {
             bit_depth: 16,
             bpm: 128.0,
             key: None,
-            beat_grid: BeatGrid {
-                bpm: 128.0,
-                first_beat_ms: 0.0,
-                beats: vec![],
-            },
-            waveform: Waveform {
-                preview: WaveformPreview { columns: vec![] },
-                detail: WaveformDetail { entries: vec![] },
-            },
+            beat_grid: BeatGrid::default(),
+            waveform: Waveform::default(),
             file_size: 5_000_000,
             file_hash: 0x12345678ABCDEF00,
-        };
+            year: None,
+            comment: None,
+            track_number: None,
+            file_type: FileType::Mp3,
+        }
+    }
+    
+    #[test]
+    fn test_cache_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let cache = AnalysisCache::new(tmp.path()).unwrap();
+        
+        let analysis = make_test_analysis();
         
         // Store and retrieve
         cache.put(&analysis).unwrap();
@@ -168,5 +167,45 @@ mod tests {
         
         assert_eq!(retrieved.id, analysis.id);
         assert_eq!(retrieved.title, analysis.title);
+        assert_eq!(retrieved.file_hash, analysis.file_hash);
+    }
+    
+    #[test]
+    fn test_cache_miss() {
+        let tmp = TempDir::new().unwrap();
+        let cache = AnalysisCache::new(tmp.path()).unwrap();
+        
+        let result = cache.get(0xDEADBEEF);
+        assert!(result.is_none());
+    }
+    
+    #[test]
+    fn test_cache_stats() {
+        let tmp = TempDir::new().unwrap();
+        let cache = AnalysisCache::new(tmp.path()).unwrap();
+        
+        let mut analysis = make_test_analysis();
+        cache.put(&analysis).unwrap();
+        
+        analysis.file_hash = 0x9999;
+        cache.put(&analysis).unwrap();
+        
+        let stats = cache.stats().unwrap();
+        assert_eq!(stats.entry_count, 2);
+        assert!(stats.total_size_bytes > 0);
+    }
+    
+    #[test]
+    fn test_cache_clear() {
+        let tmp = TempDir::new().unwrap();
+        let cache = AnalysisCache::new(tmp.path()).unwrap();
+        
+        let analysis = make_test_analysis();
+        cache.put(&analysis).unwrap();
+        
+        cache.clear().unwrap();
+        
+        let stats = cache.stats().unwrap();
+        assert_eq!(stats.entry_count, 0);
     }
 }

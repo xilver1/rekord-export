@@ -1,7 +1,10 @@
-//! Rekordbox USB Export Server
+//! rekordbox-server: Audio analysis and Pioneer export generation
 //!
-//! Runs as a service on the NAS, analyzing audio files and generating
-//! Pioneer-compatible USB exports.
+//! This server runs on the NAS (Dell Wyse 5070) and handles:
+//! - Audio file analysis (BPM, waveforms, beat grids)
+//! - PDB database generation
+//! - ANLZ file generation
+//! - Communication with CLI client via Unix socket
 
 mod analyzer;
 mod config;
@@ -10,94 +13,90 @@ mod server;
 mod waveform;
 
 use std::path::PathBuf;
+
 use clap::Parser;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use rekordbox_core::AnalysisCache;
 use config::Config;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "rekordbox-server")]
-#[command(about = "Analyze music and export to Pioneer USB format")]
-struct Cli {
-    /// Path to music directory (pre-export folder)
-    #[arg(short, long, default_value = "/mnt/music/pre-export")]
+#[command(about = "Pioneer DJ export server for NAS deployment")]
+struct Args {
+    /// Music directory to analyze
+    #[arg(short, long, default_value = "/mnt/ssd/pre-export")]
     music_dir: PathBuf,
     
-    /// Path to cache directory (on SSD)
-    #[arg(short, long, default_value = "/mnt/ssd/rekordbox-cache")]
+    /// Cache directory for analysis results
+    #[arg(short, long, default_value = "/var/cache/rekordbox")]
     cache_dir: PathBuf,
     
-    /// Output directory for USB export
-    #[arg(short, long)]
-    output_dir: Option<PathBuf>,
-    
-    /// Server socket path for CLI communication
-    #[arg(long, default_value = "/tmp/rekordbox.sock")]
+    /// Unix socket path for IPC
+    #[arg(short, long, default_value = "/tmp/rekordbox.sock")]
     socket: PathBuf,
     
-    /// Run analysis only (don't start server)
-    #[arg(long)]
-    analyze_only: bool,
-    
-    /// Export to USB immediately after analysis
-    #[arg(long)]
-    export: bool,
-    
-    /// Maximum concurrent analysis tasks (memory-aware)
-    #[arg(long, default_value = "2")]
-    max_concurrent: usize,
-    
-    /// Verbose logging
+    /// Run in foreground (don't daemonize)
     #[arg(short, long)]
-    verbose: bool,
+    foreground: bool,
+    
+    /// Export directly to path without running server
+    #[arg(short, long)]
+    export: Option<PathBuf>,
+    
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, default_value = "info")]
+    log_level: String,
 }
 
-#[tokio::main(flavor = "current_thread")] // Single-threaded for memory efficiency
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let args = Args::parse();
     
     // Setup logging
-    let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
+    let level = match args.log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::INFO,
+    };
+    
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
+        .with_target(false)
         .compact()
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
     
-    info!("Rekordbox Export Server starting");
-    info!("Music directory: {:?}", cli.music_dir);
-    info!("Cache directory: {:?}", cli.cache_dir);
-    
-    let config = Config {
-        music_dir: cli.music_dir,
-        cache_dir: cli.cache_dir,
-        output_dir: cli.output_dir,
-        socket_path: cli.socket,
-        max_concurrent: cli.max_concurrent,
-    };
+    info!("rekordbox-server starting");
+    info!("Music directory: {:?}", args.music_dir);
+    info!("Cache directory: {:?}", args.cache_dir);
     
     // Initialize cache
-    let cache = rekordbox_core::cache::AnalysisCache::new(&config.cache_dir)?;
-    info!("Cache initialized: {:?}", cache.stats()?);
+    let cache = AnalysisCache::new(&args.cache_dir)?;
     
-    if cli.analyze_only {
-        // One-shot analysis
-        let results = analyzer::analyze_directory(&config, &cache).await?;
-        info!("Analyzed {} tracks", results.len());
+    let config = Config {
+        music_dir: args.music_dir,
+        cache_dir: args.cache_dir,
+        output_dir: args.export.clone(),
+        socket_path: args.socket,
+        max_concurrent: 1, // Single-threaded for memory efficiency
+    };
+    
+    // If --export is specified, run export directly and exit
+    if let Some(output_path) = args.export {
+        info!("Running direct export to {:?}", output_path);
         
-        if cli.export {
-            if let Some(output_dir) = &config.output_dir {
-                export::export_usb(&results, output_dir)?;
-                info!("Export complete: {:?}", output_dir);
-            } else {
-                anyhow::bail!("--export requires --output-dir");
-            }
-        }
-    } else {
-        // Run as server
-        server::run(config, cache).await?;
+        let tracks = analyzer::analyze_directory(&config, &cache).await?;
+        export::export_usb(&tracks, &config.music_dir, &output_path)?;
+        
+        info!("Export complete");
+        return Ok(());
     }
     
-    Ok(())
+    // Otherwise run as server
+    server::run(config, cache).await
 }

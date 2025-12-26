@@ -2,7 +2,6 @@
 //!
 //! Provides a simple JSON-RPC style interface for the lightweight CLI client.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -11,7 +10,7 @@ use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error, debug};
 
-use rekordbox_core::cache::AnalysisCache;
+use rekordbox_core::AnalysisCache;
 use crate::config::Config;
 use crate::analyzer;
 use crate::export;
@@ -25,23 +24,13 @@ struct ServerState {
 /// Request from CLI client
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method")]
+#[serde(rename_all = "snake_case")]
 enum Request {
-    #[serde(rename = "analyze")]
     Analyze { path: Option<String> },
-    
-    #[serde(rename = "export")]
     Export { output: String },
-    
-    #[serde(rename = "status")]
     Status,
-    
-    #[serde(rename = "cache_stats")]
     CacheStats,
-    
-    #[serde(rename = "cache_clear")]
     CacheClear,
-    
-    #[serde(rename = "list_tracks")]
     ListTracks,
 }
 
@@ -148,17 +137,17 @@ async fn handle_request(
 ) -> Response {
     match request {
         Request::Analyze { path } => {
-            let state = state.lock().await;
+            let state_guard = state.lock().await;
             let music_dir = path
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| state.config.music_dir.clone());
+                .unwrap_or_else(|| state_guard.config.music_dir.clone());
             
             let config = Config {
                 music_dir,
-                ..state.config.clone()
+                ..state_guard.config.clone()
             };
             
-            match analyzer::analyze_directory(&config, &state.cache).await {
+            match analyzer::analyze_directory(&config, &state_guard.cache).await {
                 Ok(tracks) => {
                     Response::ok_with_data(
                         format!("Analyzed {} tracks", tracks.len()),
@@ -170,6 +159,7 @@ async fn handle_request(
                                 "artist": t.artist,
                                 "bpm": t.bpm,
                                 "key": t.key.map(|k| k.to_camelot()),
+                                "duration": t.duration_secs,
                             })).collect::<Vec<_>>()
                         })
                     )
@@ -179,13 +169,13 @@ async fn handle_request(
         }
         
         Request::Export { output } => {
-            let state = state.lock().await;
+            let state_guard = state.lock().await;
             let output_path = std::path::Path::new(&output);
             
             // First analyze
-            match analyzer::analyze_directory(&state.config, &state.cache).await {
+            match analyzer::analyze_directory(&state_guard.config, &state_guard.cache).await {
                 Ok(tracks) => {
-                    match export::export_usb(&tracks, output_path) {
+                    match export::export_usb(&tracks, &state_guard.config.music_dir, output_path) {
                         Ok(()) => Response::ok(format!("Exported {} tracks to {}", tracks.len(), output)),
                         Err(e) => Response::error(format!("Export failed: {}", e)),
                     }
@@ -199,8 +189,8 @@ async fn handle_request(
         }
         
         Request::CacheStats => {
-            let state = state.lock().await;
-            match state.cache.stats() {
+            let state_guard = state.lock().await;
+            match state_guard.cache.stats() {
                 Ok(stats) => Response::ok_with_data(
                     "Cache statistics",
                     serde_json::json!({
@@ -214,16 +204,16 @@ async fn handle_request(
         }
         
         Request::CacheClear => {
-            let state = state.lock().await;
-            match state.cache.clear() {
+            let state_guard = state.lock().await;
+            match state_guard.cache.clear() {
                 Ok(()) => Response::ok("Cache cleared"),
                 Err(e) => Response::error(format!("Failed to clear cache: {}", e)),
             }
         }
         
         Request::ListTracks => {
-            let state = state.lock().await;
-            match analyzer::analyze_directory(&state.config, &state.cache).await {
+            let state_guard = state.lock().await;
+            match analyzer::analyze_directory(&state_guard.config, &state_guard.cache).await {
                 Ok(tracks) => Response::ok_with_data(
                     format!("{} tracks found", tracks.len()),
                     serde_json::json!(tracks.iter().map(|t| serde_json::json!({

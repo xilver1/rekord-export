@@ -1,255 +1,137 @@
-# Rekordbox USB Export
+# rekord-export
 
-A Rust-based system for analyzing music and generating Pioneer CDJ-compatible USB exports.
+Rust-based Pioneer CDJ USB export generator. Creates USB drives compatible with CDJ-2000 and newer players without requiring Rekordbox software.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Server                             │
-│                                                                 │
-│  ┌──────────────────┐    ┌─────────────────────────────────┐   │
-│  │ rekordbox-server │◄───│ Music Files                     │   │
-│  │                  │    │ /mnt/ssd/pre-export/            │   │
-│  │ • Audio analysis │    │   ├── Playlist1/                │   │
-│  │ • BPM detection  │    │   │   ├── track1.mp3           │   │
-│  │ • Waveform gen   │    │   │   └── track2.flac          │   │
-│  │ • PDB/ANLZ write │    │   └── Playlist2/                │   │
-│  └────────┬─────────┘    │       └── track3.wav           │   │
-│           │              └─────────────────────────────────┘   │
-│           │                                                     │
-│           │ Unix Socket                                         │
-│           │ /tmp/rekordbox.sock                                │
-│           │                                                     │
-│           │              ┌─────────────────────────────────┐   │
-│           │              │ Analysis Cache                  │   │
-│           └─────────────►│ /mnt/ssd/rekordbox-cache/       │   │
-│                          │ (file-based, on SSD)            │   │
-│                          └─────────────────────────────────┘   │
-│                                                                 │
-└───────────────────────────────┬─────────────────────────────────┘
-                                │ Wireguard VPN
-                                │
-┌───────────────────────────────▼─────────────────────────────────┐
-│ Android Phone (Termux)                                          │
-│                                                                 │
-│  ┌─────────────┐                                                │
-│  │ rbx CLI     │  $ rbx analyze                                 │
-│  │ (~500KB)    │  $ rbx export /mnt/usb                         │
-│  └─────────────┘  $ rbx list                                    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────┐     Unix Socket      ┌─────────────────┐
+│  rekordbox-cli  │ ◄──────────────────► │ rekordbox-server│
+│   (Termux)      │                      │   (NAS/x86)     │
+│   ~400KB        │                      │                 │
+└─────────────────┘                      └────────┬────────┘
+                                                  │
+                                         ┌────────▼────────┐
+                                         │  rekordbox-core │
+                                         │ (PDB/ANLZ gen)  │
+                                         └─────────────────┘
 ```
 
-## Hardware Requirements
+- **rekordbox-core**: Binary format library for PDB (DeviceSQL) and ANLZ files
+- **rekordbox-server**: Audio analysis + export generation daemon for NAS
+- **rekordbox-cli**: Lightweight client for Termux on Android
 
-- **Server**: Dell Wyse 5070 (or similar low-power x86)
-  - 8GB RAM minimum
-  - External SSD for music and cache (eMMC too small)
-  - Running OpenMediaVault or similar
+## USB Structure Generated
 
-- **Client**: Any device with Termux or Rust support
-  - ~500KB binary size for CLI
-
-## Building
-
-### On the NAS (server)
-
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone and build
-git clone https://github.com/yourusername/rekordbox-export
-cd rekordbox-export
-
-# Build release (optimized for size)
-cargo build --release
-
-# Server binary: target/release/rekordbox-server (~5MB)
-# CLI binary: target/release/rbx (~500KB)
-```
-
-### Cross-compile CLI for Android (aarch64)
-
-```bash
-# Add Android target
-rustup target add aarch64-linux-android
-
-# Install Android NDK and set up linker (see rustup docs)
-# Then build:
-cargo build --release --target aarch64-linux-android -p rekordbox-cli
-```
-
-## Installation
-
-### Server (systemd service)
-
-```bash
-# Copy binary
-sudo cp target/release/rekordbox-server /usr/local/bin/
-
-# Create service file
-sudo cp rekordbox.service /etc/systemd/system/
-
-# Enable and start
-sudo systemctl enable rekordbox
-sudo systemctl start rekordbox
-```
-
-### CLI (Termux)
-
-```bash
-# Copy to Termux
-scp target/aarch64-linux-android/release/rbx user@phone:~/bin/
-
-# Or build locally in Termux:
-pkg install rust
-cargo build --release -p rekordbox-cli
-cp target/release/rbx ~/bin/
-```
-
-## Usage
-
-### Start the server
-```bash
-rekordbox-server \
-  --music-dir /mnt/ssd/pre-export \
-  --cache-dir /mnt/ssd/rekordbox-cache \
-  --socket /tmp/rekordbox.sock
-```
-
-### CLI commands
-
-```bash
-# Check server status
-rbx status
-
-# Analyze all tracks
-rbx analyze
-
-# List analyzed tracks
-rbx list
-
-# Export to USB
-rbx export /mnt/usb
-
-# View cache stats
-rbx cache
-
-# Clear cache
-rbx cache --clear
-```
-
-### One-shot export (without server)
-
-```bash
-rekordbox-server \
-  --music-dir /mnt/ssd/pre-export \
-  --cache-dir /mnt/ssd/rekordbox-cache \
-  --output-dir /mnt/usb \
-  --analyze-only --export
-```
-
-## Directory Structure
-
-### Input (pre-export folder)
-```
-/mnt/ssd/pre-export/
-├── House/
-│   ├── track1.mp3
-│   └── track2.flac
-├── Techno/
-│   └── track3.wav
-└── Warm-up/
-    └── track4.aiff
-```
-
-Each subfolder becomes a playlist.
-
-### Output (USB export)
 ```
 USB_ROOT/
 ├── PIONEER/
 │   ├── rekordbox/
-│   │   └── export.pdb
+│   │   └── export.pdb          # Track database (DeviceSQL format)
 │   └── USBANLZ/
 │       └── P000/
-│           ├── 00000001/
-│           │   ├── ANLZ0000.DAT
-│           │   └── ANLZ0000.EXT
-│           └── 00000002/
-│               └── ...
+│           └── 00000001/
+│               ├── ANLZ0000.DAT  # Beat grid, waveforms
+│               └── ANLZ0000.EXT  # Extended analysis
 └── Contents/
-    ├── track1.mp3
-    ├── track2.flac
-    └── ...
+    └── *.mp3, *.flac, etc.     # Audio files
 ```
 
-## USB Preparation
-
-**CRITICAL**: USB must be FAT32 with MBR partition table!
+## Building
 
 ```bash
-# Check current format
-lsblk -f /dev/sdX
+# Build all crates
+cargo build --release
 
-# Reformat if needed (WARNING: destroys data!)
-sudo wipefs -a /dev/sdX
-sudo parted /dev/sdX mklabel msdos
-sudo parted /dev/sdX mkpart primary fat32 1MiB 100%
-sudo mkfs.vfat -F 32 /dev/sdX1
+# Build only the CLI (for Termux)
+cargo build --release -p rekordbox-cli
+
+# Cross-compile CLI for Android/aarch64
+cargo build --release -p rekordbox-cli --target aarch64-linux-android
 ```
 
-GPT partition tables will cause CDJ rejection even with FAT32!
+## Usage
 
-## CDJ Compatibility
+### Direct Export (no server)
 
-| Player | .DAT | .EXT | .2EX | Notes |
-|--------|------|------|------|-------|
-| CDJ-2000 | ✓ | ✗ | ✗ | Monochrome waveforms only |
-| CDJ-2000NXS | ✓ | ✓ | ✗ | Color waveforms |
-| CDJ-2000NXS2 | ✓ | ✓ | ✗ | Color waveforms |
-| CDJ-3000 | ✓ | ✓ | ✓ | Full color, exFAT support |
-| XDJ-XZ | ✓ | ✓ | ✗ | Color waveforms |
-| XDJ-RX3 | ✓ | ✓ | ✗ | Color waveforms |
-
-## Memory Optimization
-
-The server is designed for memory-constrained environments:
-
-- Single-threaded async runtime (no thread pool overhead)
-- Streaming audio decoding (max ~50MB sample buffer)
-- File-based cache (no in-memory analysis storage)
-- Chunk-based FFT for waveform generation
-
-Typical memory usage: 200-500MB during analysis, <50MB idle.
-
-## Known Limitations
-
-1. **BPM Detection**: Uses simple autocorrelation (~85% accuracy).
-   For DJ-grade accuracy, consider integrating stratum-dsp.
-
-2. **Key Detection**: Not yet implemented.
-   Placeholder returns `None` for all tracks.
-
-3. **PDB Format**: Simplified implementation.
-   Full rekordcrate-style page management needed for large libraries.
-
-4. **Hot Cues/Memory Points**: Not supported yet.
-   Only beat grids and waveforms are exported.
-
-## Development
-
-### Running tests
 ```bash
-cargo test --workspace
+# Export music folder directly to USB
+rekordbox-server --music-dir /path/to/music --export /media/usb
 ```
 
-### Format reference
-- [Deep Symmetry Analysis](https://djl-analysis.deepsymmetry.org/djl-analysis/)
-- [rekordcrate source](https://github.com/Holzhaus/rekordcrate)
-- [REX Go implementation](https://github.com/kimtore/rex)
+### Server Mode
+
+On the NAS:
+```bash
+# Start server
+rekordbox-server --music-dir /mnt/ssd/pre-export --socket /tmp/rekordbox.sock
+```
+
+From Termux (or any client):
+```bash
+# Check server status
+rekordbox status
+
+# Analyze tracks
+rekordbox analyze
+
+# Export to USB
+rekordbox export /storage/usb
+
+# List analyzed tracks
+rekordbox list
+
+# Cache management
+rekordbox cache-stats
+rekordbox cache-clear
+```
+
+## PDB Format Implementation
+
+The export.pdb file uses Pioneer's DeviceSQL format:
+- 4096-byte pages
+- Little-endian byte order
+- Tables: tracks, artists, albums, genres, keys, playlists
+- Row index grows backward from page end
+- Heap grows forward from offset 0x28
+- DeviceSQL strings: short ASCII (flag|1), long ASCII (0x40), UTF-16LE (0x90)
+
+### Track Row Structure (94+ bytes)
+- Subtype, sample_rate, file_size, artwork_id, key_id
+- artist_id, album_id, genre_id, tempo (BPM × 100)
+- 21 string offsets pointing to: title, artist, file_path, analyze_path, etc.
+
+## ANLZ Format Implementation
+
+Analysis files (.DAT, .EXT) are **big-endian** and contain tagged sections:
+- **PPTH**: File path (UTF-16BE encoded)
+- **PQTZ**: Beat grid (beat number, tempo×100, time_ms)
+- **PWAV**: Preview waveform (400 bytes, 5-bit height + 3-bit whiteness)
+- **PWV5**: Detail waveform (150 entries/sec, RGB + height)
+
+## Testing Without CDJ Hardware
+
+1. **Mixxx DJ** (v2.3+): Import USB as Rekordbox library
+2. **rekordcrate CLI**: `rekordcrate dump-pdb export.pdb`
+3. **Kaitai Web IDE**: Visual binary inspection at ide.kaitai.io
+
+## Key Differences From Original Broken Implementation
+
+| Issue | Before | After |
+|-------|--------|-------|
+| edition | "2024" (invalid) | "2021" |
+| Track pages | `vec![0u8; PAGE_SIZE]` (empty) | Actual row data with strings |
+| Row index | Missing | Backward-growing from page end |
+| String encoding | None | DeviceSQL format (short/long/UTF-16) |
+| Page headers | Incomplete | Full header with row counts, free_size |
+| ANLZ byte order | Little-endian | Big-endian (correct) |
+
+## References
+
+- [Deep Symmetry Analysis](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/exports.html)
+- [rekordcrate](https://github.com/Holzhaus/rekordcrate) - Rust PDB/ANLZ library
+- [REX](https://github.com/kimtore/rex) - Go implementation
+- [crate-digger](https://github.com/Deep-Symmetry/crate-digger) - Java + documentation
 
 ## License
 

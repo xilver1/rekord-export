@@ -8,13 +8,13 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2024"
-authors = ["Your Name"]
+edition = "2021"
+authors = ["rekord-export contributors"]
 license = "MIT"
-repository = "https://github.com/yourusername/rekordbox-export"
+repository = "https://github.com/xilver1/rekord-export"
 
 [workspace.dependencies]
-# Core serialization - rekordcrate uses this
+# Binary serialization
 binrw = "0.14"
 
 # Audio decoding - pure Rust, streaming support
@@ -22,30 +22,20 @@ symphonia = { version = "0.5", default-features = false, features = [
     "mp3", "flac", "aac", "wav", "aiff", "pcm"
 ]}
 
-# BPM/key detection - 87.7% accuracy, pure Rust
-# Note: stratum-dsp may need to be vendored or use git
-# stratum-dsp = "0.1"
-
 # FFT for waveform generation - SIMD optimized
 rustfft = "6.2"
 
-# Spectrum analysis
-spectrum-analyzer = "1.5"
-
-# Async runtime - tokio for server, but memory-conscious config
-tokio = { version = "1.41", features = ["rt", "net", "io-util", "sync", "macros"] }
+# Async runtime - single-threaded for memory efficiency
+tokio = { version = "1.41", features = ["rt", "net", "io-util", "sync", "macros", "fs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Filesystem watching
-notify = "6.1"
-
-# CLI argument parsing (minimal)
+# CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
 
-# Logging - lightweight
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -58,9 +48,6 @@ walkdir = "2.5"
 
 # Hashing for cache keys
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-# Memory-mapped files for large audio
-memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3

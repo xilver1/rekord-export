@@ -16,7 +16,6 @@ tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "macros"
 # Audio processing
 symphonia.workspace = true
 rustfft.workspace = true
-spectrum-analyzer.workspace = true
 
 # Serialization  
 serde.workspace = true
@@ -34,10 +33,6 @@ anyhow.workspace = true
 
 # Filesystem
 walkdir.workspace = true
-notify.workspace = true
-
-# Memory efficiency
-memmap2.workspace = true
 
 [dev-dependencies]
 tempfile = "3.13"

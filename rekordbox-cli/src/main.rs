@@ -1,47 +1,56 @@
-//! Lightweight CLI client for rekordbox-server over unix socket
+//! rekordbox-cli: Lightweight client for Termux
+//!
+//! Communicates with rekordbox-server over Unix socket.
+//! Designed to be tiny (<500KB) for mobile deployment.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use serde::{Deserialize, Serialize};
 
-#[derive(Parser)]
-#[command(name = "rbx")]
-#[command(about = "Rekordbox USB Export CLI")]
-#[command(version)]
-struct Cli {
-    /// Server socket path
+#[derive(Parser, Debug)]
+#[command(name = "rekordbox")]
+#[command(about = "Pioneer DJ export CLI client")]
+struct Args {
+    /// Unix socket path
     #[arg(short, long, default_value = "/tmp/rekordbox.sock")]
     socket: PathBuf,
     
     #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
-#[derive(Subcommand)]
-enum Commands {
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Check server status
+    Status,
+    
+    /// Analyze music directory
     Analyze {
-        /// Uses server default if not specified
+        /// Optional path override
         #[arg(short, long)]
         path: Option<String>,
     },
     
+    /// Export to USB device
     Export {
-        /// Output directory (USB mount point)
+        /// Output path (USB mount point)
         output: String,
     },
     
-    Status,
+    /// List analyzed tracks
     List,
-    Cache {
-        #[arg(long)]
-        clear: bool,
-    },
+    
+    /// Show cache statistics
+    CacheStats,
+    
+    /// Clear analysis cache
+    CacheClear,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct Request {
     method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,61 +59,72 @@ struct Request {
     output: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Response {
     success: bool,
     message: Option<String>,
     data: Option<serde_json::Value>,
 }
 
-fn main() {
-    let cli = Cli::parse();
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
     
-    if let Err(e) = run(cli) {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    }
-}
-
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let request = match cli.command {
-        Commands::Analyze { path } => Request {
-            method: "analyze".into(),
-            path,
-            output: None,
-        },
-        Commands::Export { output } => Request {
-            method: "export".into(),
-            path: None,
-            output: Some(output),
-        },
-        Commands::Status => Request {
+    let request = match args.command {
+        Command::Status => Request {
             method: "status".into(),
             path: None,
             output: None,
         },
-        Commands::List => Request {
+        Command::Analyze { path } => Request {
+            method: "analyze".into(),
+            path,
+            output: None,
+        },
+        Command::Export { output } => Request {
+            method: "export".into(),
+            path: None,
+            output: Some(output),
+        },
+        Command::List => Request {
             method: "list_tracks".into(),
             path: None,
             output: None,
         },
-        Commands::Cache { clear } => Request {
-            method: if clear { "cache_clear" } else { "cache_stats" }.into(),
+        Command::CacheStats => Request {
+            method: "cache_stats".into(),
+            path: None,
+            output: None,
+        },
+        Command::CacheClear => Request {
+            method: "cache_clear".into(),
             path: None,
             output: None,
         },
     };
     
-    let mut stream = UnixStream::connect(&cli.socket)
-        .map_err(|e| format!("Cannot connect to server at {:?}: {}", cli.socket, e))?;
+    // Connect to server
+    let stream = match UnixStream::connect(&args.socket).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to connect to server at {:?}: {}", args.socket, e);
+            eprintln!("Is rekordbox-server running?");
+            std::process::exit(1);
+        }
+    };
     
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    
+    // Send request
     let request_json = serde_json::to_string(&request)?;
-    writeln!(stream, "{}", request_json)?;
-    stream.flush()?;
+    writer.write_all(request_json.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
     
-    let mut reader = BufReader::new(&stream);
+    // Read response
     let mut response_line = String::new();
-    reader.read_line(&mut response_line)?;
+    reader.read_line(&mut response_line).await?;
     
     let response: Response = serde_json::from_str(&response_line)?;
     
@@ -114,43 +134,69 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         
         if let Some(data) = response.data {
-            print_data(&data, &request.method);
+            print_data(&data, &args.command);
         }
     } else {
-        if let Some(msg) = response.message {
-            eprintln!("✗ {}", msg);
-        }
+        eprintln!("✗ {}", response.message.unwrap_or_else(|| "Unknown error".into()));
         std::process::exit(1);
     }
     
     Ok(())
 }
 
-fn print_data(data: &serde_json::Value, method: &str) {
-    match method {
-        "list_tracks" | "analyze" => {
-            if let Some(tracks) = data.as_array().or_else(|| data.get("tracks").and_then(|t| t.as_array())) {
-                println!("\nTracks:");
+fn print_data(data: &serde_json::Value, command: &Command) {
+    match command {
+        Command::List => {
+            if let Some(tracks) = data.as_array() {
+                println!("\n{:<4} {:<30} {:<25} {:<8} {:<6}", "ID", "Title", "Artist", "BPM", "Key");
+                println!("{}", "-".repeat(80));
                 for track in tracks {
-                    let id = track.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let title = track.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                    let artist = track.get("artist").and_then(|v| v.as_str()).unwrap_or("?");
-                    let bpm = track.get("bpm").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let key = track.get("key").and_then(|v| v.as_str()).unwrap_or("-");
-                    
-                    println!("  {:3}. {} - {} [{:.0} BPM, {}]", id, artist, title, bpm, key);
+                    println!(
+                        "{:<4} {:<30} {:<25} {:<8.1} {:<6}",
+                        track["id"].as_u64().unwrap_or(0),
+                        truncate(track["title"].as_str().unwrap_or(""), 29),
+                        truncate(track["artist"].as_str().unwrap_or(""), 24),
+                        track["bpm"].as_f64().unwrap_or(0.0),
+                        track["key"].as_str().unwrap_or("-"),
+                    );
                 }
             }
         }
-        "cache_stats" => {
-            let entries = data.get("entries").and_then(|v| v.as_u64()).unwrap_or(0);
-            let size_mb = data.get("size_mb").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            println!("  Entries: {}", entries);
-            println!("  Size: {:.2} MB", size_mb);
+        Command::Analyze { .. } => {
+            if let Some(tracks) = data.get("tracks").and_then(|t| t.as_array()) {
+                println!("\nAnalyzed tracks:");
+                for track in tracks.iter().take(10) {
+                    println!(
+                        "  {} - {} ({:.1} BPM, {})",
+                        track["artist"].as_str().unwrap_or("?"),
+                        track["title"].as_str().unwrap_or("?"),
+                        track["bpm"].as_f64().unwrap_or(0.0),
+                        track["key"].as_str().unwrap_or("-"),
+                    );
+                }
+                if tracks.len() > 10 {
+                    println!("  ... and {} more", tracks.len() - 10);
+                }
+            }
+        }
+        Command::CacheStats => {
+            println!("\nCache statistics:");
+            println!("  Entries: {}", data["entries"].as_u64().unwrap_or(0));
+            println!("  Size: {:.2} MB", data["size_mb"].as_f64().unwrap_or(0.0));
         }
         _ => {
-            // Pretty print JSON for unknown methods
-            println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
+            // For other commands, just pretty-print the JSON if there's data
+            if !data.is_null() {
+                println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
+            }
         }
+    }
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len - 1])
     }
 }

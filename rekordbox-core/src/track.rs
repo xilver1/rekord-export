@@ -37,6 +37,40 @@ pub struct TrackAnalysis {
     pub file_size: u64,
     /// XXH3 hash of file for cache invalidation
     pub file_hash: u64,
+    /// Year of release
+    pub year: Option<u16>,
+    /// Track comment
+    pub comment: Option<String>,
+    /// Track number in album
+    pub track_number: Option<u32>,
+    /// File type (MP3, FLAC, etc.)
+    pub file_type: FileType,
+}
+
+/// Audio file type
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[repr(u16)]
+pub enum FileType {
+    #[default]
+    Unknown = 0x00,
+    Mp3 = 0x01,
+    M4a = 0x04,
+    Flac = 0x05,
+    Wav = 0x0B,
+    Aiff = 0x0C,
+}
+
+impl FileType {
+    pub fn from_extension(ext: &str) -> Self {
+        match ext.to_lowercase().as_str() {
+            "mp3" => FileType::Mp3,
+            "m4a" | "aac" => FileType::M4a,
+            "flac" => FileType::Flac,
+            "wav" => FileType::Wav,
+            "aiff" | "aif" => FileType::Aiff,
+            _ => FileType::Unknown,
+        }
+    }
 }
 
 /// Musical key in Open Key / Camelot notation
@@ -49,10 +83,17 @@ pub struct Key {
 }
 
 impl Key {
+    /// Create a new key
+    pub fn new(pitch_class: u8, is_major: bool) -> Self {
+        Self {
+            pitch_class: pitch_class % 12,
+            is_major,
+        }
+    }
+    
     /// Convert to Camelot wheel notation (1A-12B)
     pub fn to_camelot(&self) -> String {
         // Camelot mapping: minor keys are 'A', major keys are 'B'
-        // The wheel position depends on pitch class
         let camelot_map_minor = [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10]; // Am=5A, etc.
         let camelot_map_major = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]; // C=8B, etc.
         
@@ -68,40 +109,48 @@ impl Key {
     
     /// Convert to Open Key notation (1m-12d)
     pub fn to_open_key(&self) -> String {
-        let open_key_map_minor = [1, 8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6];
-        let open_key_map_major = [1, 8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6];
-        
-        let pos = if self.is_major {
-            open_key_map_major[self.pitch_class as usize]
-        } else {
-            open_key_map_minor[self.pitch_class as usize]
-        };
-        
+        // Open Key maps differently
+        let open_key_map = [1, 8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6];
+        let pos = open_key_map[self.pitch_class as usize];
         let suffix = if self.is_major { "d" } else { "m" };
         format!("{}{}", pos, suffix)
     }
     
     /// Convert to Rekordbox's internal key ID (1-24)
+    /// Based on observed export.pdb values
     pub fn to_rekordbox_id(&self) -> u8 {
-        // Rekordbox uses 1-12 for minor, 13-24 for major (roughly)
-        // This mapping is based on observed export.pdb values
+        // Rekordbox key IDs follow the circle of fifths
+        // Minor: 1=Cm, 2=Gm, 3=Dm, 4=Am, 5=Em, 6=Bm, 7=F#m, 8=C#m, 9=G#m, 10=D#m, 11=A#m, 12=Fm
+        // Major: 13=C, 14=G, 15=D, 16=A, 17=E, 18=B, 19=F#, 20=C#, 21=G#, 22=D#, 23=A#, 24=F
+        let minor_map = [1, 8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6]; // C=1, C#=8, D=3, etc.
+        let id = minor_map[self.pitch_class as usize];
         if self.is_major {
-            13 + self.pitch_class
+            id + 12
         } else {
-            1 + self.pitch_class
+            id
+        }
+    }
+    
+    /// Get the key name (e.g., "Am", "C")
+    pub fn name(&self) -> String {
+        let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let note = note_names[self.pitch_class as usize];
+        if self.is_major {
+            note.to_string()
+        } else {
+            format!("{}m", note)
         }
     }
 }
 
 /// Beat grid containing all beat positions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BeatGrid {
-    /// Tempo in BPM (may vary for dynamic tempo tracks)
+    /// Tempo in BPM
     pub bpm: f64,
     /// First beat position in milliseconds from track start
     pub first_beat_ms: f64,
-    /// Beat positions: Vec of (beat_number 1-4, time_ms)
-    /// beat_number indicates position within bar (1=downbeat)
+    /// Beat positions
     pub beats: Vec<Beat>,
 }
 
@@ -155,7 +204,7 @@ impl BeatGrid {
 }
 
 /// Waveform data for both preview and detail displays
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Waveform {
     /// Preview waveform (400 entries, monochrome)
     pub preview: WaveformPreview,
@@ -164,14 +213,14 @@ pub struct Waveform {
 }
 
 /// Preview waveform (PWAV format - 400 bytes total)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WaveformPreview {
     /// 400 columns, each with height (0-31) and whiteness (0-7)
     pub columns: Vec<WaveformColumn>,
 }
 
 /// Single column in preview waveform
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct WaveformColumn {
     /// Height 0-31 (5 bits)
     pub height: u8,
@@ -195,7 +244,7 @@ impl WaveformColumn {
 }
 
 /// Detail color waveform (PWV5 format - 150 entries/second)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WaveformDetail {
     /// Color entries at 150/second rate
     pub entries: Vec<WaveformColorEntry>,
@@ -203,7 +252,7 @@ pub struct WaveformDetail {
 
 /// Color waveform entry (PWV5 format)
 /// RGB represents frequency bands: Red=bass, Green=mids, Blue=highs
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct WaveformColorEntry {
     /// Red channel 0-7 (3 bits) - bass energy (20-200Hz)
     pub red: u8,
@@ -216,7 +265,7 @@ pub struct WaveformColorEntry {
 }
 
 impl WaveformColorEntry {
-    /// Encode to PWV5 2-byte format
+    /// Encode to PWV5 2-byte format (big-endian for ANLZ)
     /// Bits 15-13: red, 12-10: green, 9-7: blue, 6-2: height, 1-0: unused
     pub fn to_bytes(&self) -> [u8; 2] {
         let value: u16 = 
@@ -246,12 +295,23 @@ mod tests {
     #[test]
     fn test_key_camelot() {
         // A minor = 5A
-        let am = Key { pitch_class: 9, is_major: false };
+        let am = Key::new(9, false);
         assert_eq!(am.to_camelot(), "5A");
         
         // C major = 8B
-        let c = Key { pitch_class: 0, is_major: true };
+        let c = Key::new(0, true);
         assert_eq!(c.to_camelot(), "8B");
+    }
+    
+    #[test]
+    fn test_key_rekordbox_id() {
+        // C minor should be 1
+        let cm = Key::new(0, false);
+        assert_eq!(cm.to_rekordbox_id(), 1);
+        
+        // C major should be 13
+        let c = Key::new(0, true);
+        assert_eq!(c.to_rekordbox_id(), 13);
     }
     
     #[test]
@@ -274,9 +334,17 @@ mod tests {
     fn test_beat_grid_generation() {
         let grid = BeatGrid::constant_tempo(128.0, 100.0, 10_000.0);
         assert!(!grid.is_empty());
-        // At 128 BPM, ~468.75ms per beat, so ~21 beats in 10 seconds
+        // At 128 BPM, ~468.75ms per beat, so ~21 beats in ~10 seconds
         assert!(grid.len() > 20);
         assert_eq!(grid.beats[0].beat_number, 1);
         assert_eq!(grid.beats[0].tempo_100, 12800);
+    }
+    
+    #[test]
+    fn test_file_type_from_extension() {
+        assert_eq!(FileType::from_extension("mp3"), FileType::Mp3);
+        assert_eq!(FileType::from_extension("MP3"), FileType::Mp3);
+        assert_eq!(FileType::from_extension("flac"), FileType::Flac);
+        assert_eq!(FileType::from_extension("unknown"), FileType::Unknown);
     }
 }

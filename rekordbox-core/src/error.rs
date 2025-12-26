@@ -24,6 +24,15 @@ pub enum Error {
     
     #[error("Path error: {0}")]
     Path(String),
+    
+    #[error("String encoding error: {0}")]
+    StringEncoding(String),
+    
+    #[error("Page overflow: {0}")]
+    PageOverflow(String),
+    
+    #[error("Database error: {0}")]
+    Database(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,5 +40,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<binrw::Error> for Error {
     fn from(e: binrw::Error) -> Self {
         Error::BinRw(e.to_string())
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Cache(e.to_string())
     }
 }

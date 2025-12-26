@@ -4,21 +4,22 @@ version.workspace = true
 edition = "2021"
 
 [[bin]]
-name = "rbx"
+name = "rekordbox"
 path = "src/main.rs"
 
 [dependencies]
-# Minimal dependencies for small binary size
-clap = { workspace = true, features = ["derive"] }
+# Async runtime - minimal features
+tokio = { version = "1.41", features = ["rt", "net", "io-util", "macros"] }
+
+# Serialization
 serde = { workspace = true }
-serde_json.workspace = true
+serde_json = { workspace = true }
 
-# Optional tokio for async socket (can use sync if needed)
-tokio = { version = "1.41", features = ["rt", "net", "io-util", "macros"], optional = true }
+# CLI args
+clap = { workspace = true }
 
-[features]
-default = []
-async = ["tokio"]
+# Errors
+anyhow = { workspace = true }
 
 [profile.release]
 opt-level = "z"
