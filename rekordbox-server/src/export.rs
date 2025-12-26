@@ -21,44 +21,38 @@ use rekordbox_core::{
 /// Export analyzed tracks to Pioneer USB format
 pub fn export_usb(
     tracks: &[TrackAnalysis],
+    playlists: &HashMap<String, Vec<u32>>,
     source_dir: &Path,
     output_dir: &Path,
 ) -> anyhow::Result<()> {
-    info!("Exporting {} tracks to {:?}", tracks.len(), output_dir);
-    
+    info!("Exporting {} tracks in {} playlists to {:?}",
+          tracks.len(), playlists.len(), output_dir);
+
     // Validate output directory
     validate_usb_target(output_dir)?;
-    
+
     // Create directory structure
     let pioneer_dir = output_dir.join("PIONEER");
     let rekordbox_dir = pioneer_dir.join("rekordbox");
     let anlz_dir = pioneer_dir.join("USBANLZ");
     let contents_dir = output_dir.join("Contents");
-    
+
     fs::create_dir_all(&rekordbox_dir)?;
     fs::create_dir_all(&anlz_dir)?;
     fs::create_dir_all(&contents_dir)?;
-    
-    // Group tracks by parent folder for playlists
-    let mut playlists: HashMap<String, Vec<u32>> = HashMap::new();
-    for track in tracks {
-        // Extract playlist from source path
-        let playlist_name = extract_playlist_name(source_dir, track);
-        playlists.entry(playlist_name).or_default().push(track.id);
-    }
-    
+
     // Build PDB database
     let mut pdb_builder = PdbBuilder::new();
-    
+
     for track in tracks {
         let anlz_path = generate_anlz_path(track.id);
         pdb_builder.add_track(track, &anlz_path);
     }
-    
+
     // Add playlists
     let mut playlist_id = 1u32;
-    for (name, track_ids) in &playlists {
-        if name != "default" && !name.is_empty() {
+    for (name, track_ids) in playlists {
+        if !name.is_empty() {
             pdb_builder.add_playlist(playlist_id, 0, name, track_ids.clone());
             playlist_id += 1;
         }
@@ -101,6 +95,7 @@ pub fn export_usb(
             &track.beat_grid,
             &track.waveform,
             &usb_file_path,
+            &track.cue_points,
         )?;
         let mut ext_file = File::create(&ext_path)?;
         ext_file.write_all(&ext_data)?;
@@ -112,37 +107,6 @@ pub fn export_usb(
     info!("Export complete: {} tracks, {} playlists", tracks.len(), playlists.len());
     
     Ok(())
-}
-
-/// Extract playlist name from track's source location
-fn extract_playlist_name(source_dir: &Path, track: &TrackAnalysis) -> String {
-    // The file_path in TrackAnalysis is the USB path (/Contents/file.mp3)
-    // We need to find the original source to determine playlist
-    
-    // For now, try to extract from file_path parent
-    let file_name = Path::new(&track.file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    
-    // Search source_dir for this file
-    for entry in WalkDir::new(source_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_name().to_str() == Some(file_name) {
-            if let Some(parent) = entry.path().parent() {
-                if parent != source_dir {
-                    return parent.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("default")
-                        .to_string();
-                }
-            }
-        }
-    }
-    
-    "default".to_string()
 }
 
 /// Validate USB filesystem requirements

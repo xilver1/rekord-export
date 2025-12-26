@@ -18,8 +18,8 @@ pub mod validate;
 
 // Re-exports for convenience
 pub use error::{Error, Result};
-pub use track::{TrackAnalysis, BeatGrid, Beat, Waveform, WaveformPreview, WaveformDetail, 
-                WaveformColumn, WaveformColorEntry, Key, FileType};
+pub use track::{TrackAnalysis, BeatGrid, Beat, Waveform, WaveformPreview, WaveformDetail,
+                WaveformColumn, WaveformColorEntry, Key, FileType, CuePoint, CueType};
 pub use pdb::PdbBuilder;
 pub use anlz::{generate_dat_file, generate_ext_file, generate_anlz_path};
 pub use cache::{AnalysisCache, CacheStats, compute_file_hash};

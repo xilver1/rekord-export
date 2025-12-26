@@ -210,7 +210,8 @@ impl PageBuilder {
                 ROWS_PER_GROUP,
                 self.row_offsets.len() - first_row
             );
-            let presence_flags: u16 = (1u16 << rows_in_group) - 1;
+            // Use u32 to avoid overflow when rows_in_group = 16
+            let presence_flags: u16 = ((1u32 << rows_in_group) - 1) as u16;
             self.data[group_start + 2..group_start + 4]
                 .copy_from_slice(&presence_flags.to_le_bytes());
             

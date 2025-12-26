@@ -10,8 +10,27 @@ pub struct Config {
     pub cache_dir: PathBuf,
     /// Output directory for USB export
     pub output_dir: Option<PathBuf>,
-    /// Unix socket path for IPC
-    pub socket_path: PathBuf,
+    /// TCP bind address (host:port)
+    pub bind_addr: String,
     /// Max concurrent analysis tasks
     pub max_concurrent: usize,
+    /// Navidrome configuration (optional)
+    pub navidrome: Option<NavidromeConfig>,
+}
+
+/// Navidrome/Subsonic API configuration
+#[derive(Debug, Clone)]
+pub struct NavidromeConfig {
+    /// Server URL (e.g., http://192.168.1.100:4533)
+    pub url: String,
+    /// Username
+    pub user: String,
+    /// Password
+    pub pass: String,
+}
+
+impl NavidromeConfig {
+    pub fn new(url: String, user: String, pass: String) -> Self {
+        Self { url, user, pass }
+    }
 }

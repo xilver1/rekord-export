@@ -6,11 +6,10 @@
 //! Reference: https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/exports.html
 
 use std::collections::HashMap;
-use std::io::Write;
 
-use crate::error::{Error, Result};
-use crate::page::{PageBuilder, PageType, TablePointer, FileHeader, PAGE_SIZE, HEAP_START};
-use crate::string::{encode_string, encode_isrc, encoded_length};
+use crate::error::Result;
+use crate::page::{PageBuilder, PageType, TablePointer, FileHeader, PAGE_SIZE};
+use crate::string::{encode_string, encode_isrc};
 use crate::track::TrackAnalysis;
 
 /// Row subtypes for offset size determination
@@ -362,11 +361,11 @@ impl PdbBuilder {
         // 0x14-0x17: unknown2
         row.extend_from_slice(&0u32.to_le_bytes());
         
-        // 0x18-0x19: u3 (usually 19048)
-        row.extend_from_slice(&19048u16.to_le_bytes());
-        
-        // 0x1A-0x1B: u4 (usually 30967)
-        row.extend_from_slice(&30967u16.to_le_bytes());
+        // 0x18-0x19: u3 (use 0 for maximum CDJ compatibility)
+        row.extend_from_slice(&0u16.to_le_bytes());
+
+        // 0x1A-0x1B: u4 (use 0 for maximum CDJ compatibility)
+        row.extend_from_slice(&0u16.to_le_bytes());
         
         // 0x1C-0x1F: artwork_id
         row.extend_from_slice(&0u32.to_le_bytes());
@@ -383,9 +382,8 @@ impl PdbBuilder {
         // 0x2C-0x2F: remixer_id
         row.extend_from_slice(&0u32.to_le_bytes());
         
-        // 0x30-0x33: bitrate
-        let bitrate = 320u32; // TODO: extract from file
-        row.extend_from_slice(&bitrate.to_le_bytes());
+        // 0x30-0x33: bitrate (in kbps)
+        row.extend_from_slice(&analysis.bitrate.to_le_bytes());
         
         // 0x34-0x37: track_number
         row.extend_from_slice(&analysis.track_number.unwrap_or(0).to_le_bytes());
@@ -421,8 +419,8 @@ impl PdbBuilder {
         // 0x54-0x55: duration (seconds)
         row.extend_from_slice(&(analysis.duration_secs as u16).to_le_bytes());
         
-        // 0x56-0x57: u5 (usually 29)
-        row.extend_from_slice(&29u16.to_le_bytes());
+        // 0x56-0x57: u5 (use 0 for maximum CDJ compatibility)
+        row.extend_from_slice(&0u16.to_le_bytes());
         
         // 0x58: color_id
         row.push(0);
@@ -825,10 +823,12 @@ mod tests {
             duration_secs: 180.0,
             sample_rate: 44100,
             bit_depth: 16,
+            bitrate: 320,
             bpm: 128.0,
             key: Some(Key::new(9, false)), // Am
             beat_grid: BeatGrid::default(),
             waveform: Waveform::default(),
+            cue_points: Vec::new(),
             file_size: 5_000_000,
             file_hash: 0x12345678,
             year: Some(2024),

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error, debug};
@@ -72,22 +72,18 @@ impl Response {
 
 /// Run the server
 pub async fn run(config: Config, cache: AnalysisCache) -> anyhow::Result<()> {
-    let socket_path = &config.socket_path;
-    
-    // Remove existing socket
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-    
-    // Create Unix socket listener
-    let listener = UnixListener::bind(socket_path)?;
-    info!("Server listening on {:?}", socket_path);
-    
+    let bind_addr = &config.bind_addr;
+
+    // Create TCP listener
+    let listener = TcpListener::bind(bind_addr).await?;
+    info!("Server listening on {}", bind_addr);
+
     let state = Arc::new(Mutex::new(ServerState { config, cache }));
-    
+
     loop {
         match listener.accept().await {
-            Ok((stream, _addr)) => {
+            Ok((stream, addr)) => {
+                debug!("Client connected from {}", addr);
                 let state = Arc::clone(&state);
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(stream, state).await {
@@ -104,7 +100,7 @@ pub async fn run(config: Config, cache: AnalysisCache) -> anyhow::Result<()> {
 
 /// Handle a single client connection
 async fn handle_client(
-    stream: UnixStream,
+    stream: TcpStream,
     state: Arc<Mutex<ServerState>>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
@@ -148,35 +144,43 @@ async fn handle_request(
             };
             
             match analyzer::analyze_directory(&config, &state_guard.cache).await {
-                Ok(tracks) => {
+                Ok(result) => {
                     Response::ok_with_data(
-                        format!("Analyzed {} tracks", tracks.len()),
+                        format!("Analyzed {} tracks in {} playlists",
+                                result.tracks.len(), result.playlists.len()),
                         serde_json::json!({
-                            "track_count": tracks.len(),
-                            "tracks": tracks.iter().map(|t| serde_json::json!({
+                            "track_count": result.tracks.len(),
+                            "playlist_count": result.playlists.len(),
+                            "tracks": result.tracks.iter().map(|t| serde_json::json!({
                                 "id": t.id,
                                 "title": t.title,
                                 "artist": t.artist,
                                 "bpm": t.bpm,
                                 "key": t.key.map(|k| k.to_camelot()),
                                 "duration": t.duration_secs,
-                            })).collect::<Vec<_>>()
+                            })).collect::<Vec<_>>(),
+                            "playlists": result.playlists.keys().collect::<Vec<_>>()
                         })
                     )
                 }
                 Err(e) => Response::error(format!("Analysis failed: {}", e)),
             }
         }
-        
+
         Request::Export { output } => {
             let state_guard = state.lock().await;
             let output_path = std::path::Path::new(&output);
-            
+
             // First analyze
             match analyzer::analyze_directory(&state_guard.config, &state_guard.cache).await {
-                Ok(tracks) => {
-                    match export::export_usb(&tracks, &state_guard.config.music_dir, output_path) {
-                        Ok(()) => Response::ok(format!("Exported {} tracks to {}", tracks.len(), output)),
+                Ok(result) => {
+                    match export::export_usb(
+                        &result.tracks,
+                        &result.playlists,
+                        &state_guard.config.music_dir,
+                        output_path
+                    ) {
+                        Ok(()) => Response::ok(format!("Exported {} tracks to {}", result.tracks.len(), output)),
                         Err(e) => Response::error(format!("Export failed: {}", e)),
                     }
                 }
@@ -214,18 +218,27 @@ async fn handle_request(
         Request::ListTracks => {
             let state_guard = state.lock().await;
             match analyzer::analyze_directory(&state_guard.config, &state_guard.cache).await {
-                Ok(tracks) => Response::ok_with_data(
-                    format!("{} tracks found", tracks.len()),
-                    serde_json::json!(tracks.iter().map(|t| serde_json::json!({
-                        "id": t.id,
-                        "path": t.file_path,
-                        "title": t.title,
-                        "artist": t.artist,
-                        "album": t.album,
-                        "bpm": t.bpm,
-                        "key": t.key.map(|k| k.to_camelot()),
-                        "duration": t.duration_secs,
-                    })).collect::<Vec<_>>())
+                Ok(result) => Response::ok_with_data(
+                    format!("{} tracks found in {} playlists",
+                            result.tracks.len(), result.playlists.len()),
+                    serde_json::json!({
+                        "tracks": result.tracks.iter().map(|t| serde_json::json!({
+                            "id": t.id,
+                            "path": t.file_path,
+                            "title": t.title,
+                            "artist": t.artist,
+                            "album": t.album,
+                            "bpm": t.bpm,
+                            "key": t.key.map(|k| k.to_camelot()),
+                            "duration": t.duration_secs,
+                        })).collect::<Vec<_>>(),
+                        "playlists": result.playlists.iter().map(|(name, ids)| {
+                            serde_json::json!({
+                                "name": name,
+                                "track_ids": ids,
+                            })
+                        }).collect::<Vec<_>>()
+                    })
                 ),
                 Err(e) => Response::error(format!("Failed to list tracks: {}", e)),
             }

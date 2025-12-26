@@ -17,20 +17,51 @@ use walkdir::WalkDir;
 
 use rekordbox_core::{
     AnalysisCache, compute_file_hash,
-    TrackAnalysis, BeatGrid, Beat, Waveform, Key, FileType,
+    TrackAnalysis, BeatGrid, FileType,
 };
 use crate::config::Config;
+use crate::navidrome::{NavidromeClient, build_path_to_playlist_map};
 use crate::waveform::WaveformGenerator;
+
+/// Result of directory analysis
+pub struct AnalysisResult {
+    /// Analyzed tracks
+    pub tracks: Vec<TrackAnalysis>,
+    /// Playlist name -> track IDs
+    pub playlists: HashMap<String, Vec<u32>>,
+}
 
 /// Analyze all audio files in a directory
 pub async fn analyze_directory(
     config: &Config,
     cache: &AnalysisCache,
-) -> anyhow::Result<Vec<TrackAnalysis>> {
+) -> anyhow::Result<AnalysisResult> {
+    // Try to fetch playlists from Navidrome if configured
+    let navidrome_playlists = if let Some(ref nav_config) = config.navidrome {
+        match fetch_navidrome_playlists(nav_config).await {
+            Ok(playlists) => {
+                info!("Loaded {} playlists from Navidrome", playlists.len());
+                Some(playlists)
+            }
+            Err(e) => {
+                warn!("Failed to fetch Navidrome playlists: {}. Falling back to folder-based detection.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build path-to-playlist map from Navidrome data
+    let path_to_playlist: HashMap<String, String> = navidrome_playlists
+        .as_ref()
+        .map(|p| build_path_to_playlist_map(p))
+        .unwrap_or_default();
+
     let mut results = Vec::new();
     let mut playlists: HashMap<String, Vec<u32>> = HashMap::new();
     let mut track_id = 1u32;
-    
+
     // Scan music directory
     for entry in WalkDir::new(&config.music_dir)
         .follow_links(true)
@@ -38,19 +69,19 @@ pub async fn analyze_directory(
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        
+
         // Check if audio file
         if !is_audio_file(path) {
             continue;
         }
-        
-        // Get playlist name from parent directory
-        let playlist_name = path.parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("default")
-            .to_string();
-        
+
+        // Determine playlist name
+        let playlist_name = determine_playlist_name(
+            path,
+            &config.music_dir,
+            &path_to_playlist,
+        );
+
         // Compute file hash for cache lookup
         let file_hash = match compute_file_hash(path) {
             Ok(h) => h,
@@ -59,20 +90,22 @@ pub async fn analyze_directory(
                 continue;
             }
         };
-        
+
         // Check cache first
         if let Some(mut cached) = cache.get(file_hash) {
             debug!("Cache hit for {:?}", path);
             cached.id = track_id;
-            
-            playlists.entry(playlist_name).or_default().push(track_id);
+
+            if let Some(ref name) = playlist_name {
+                playlists.entry(name.clone()).or_default().push(track_id);
+            }
             results.push(cached);
             track_id += 1;
             continue;
         }
-        
+
         info!("Analyzing: {:?}", path);
-        
+
         // Analyze track
         match analyze_track(path, track_id, file_hash) {
             Ok(analysis) => {
@@ -80,8 +113,10 @@ pub async fn analyze_directory(
                 if let Err(e) = cache.put(&analysis) {
                     warn!("Failed to cache analysis: {}", e);
                 }
-                
-                playlists.entry(playlist_name).or_default().push(track_id);
+
+                if let Some(ref name) = playlist_name {
+                    playlists.entry(name.clone()).or_default().push(track_id);
+                }
                 results.push(analysis);
                 track_id += 1;
             }
@@ -90,10 +125,68 @@ pub async fn analyze_directory(
             }
         }
     }
-    
-    info!("Found {} playlists with {} total tracks", playlists.len(), results.len());
-    
-    Ok(results)
+
+    info!(
+        "Analyzed {} tracks in {} playlists",
+        results.len(),
+        playlists.len()
+    );
+
+    Ok(AnalysisResult {
+        tracks: results,
+        playlists,
+    })
+}
+
+/// Fetch playlists from Navidrome
+async fn fetch_navidrome_playlists(
+    config: &crate::config::NavidromeConfig,
+) -> anyhow::Result<HashMap<String, Vec<crate::navidrome::PlaylistTrack>>> {
+    let client = NavidromeClient::new(&config.url, &config.user, &config.pass);
+
+    // Test connection first
+    if !client.ping().await? {
+        anyhow::bail!("Failed to connect to Navidrome");
+    }
+
+    client.get_all_playlist_tracks().await
+}
+
+/// Determine playlist name for a track
+///
+/// Priority:
+/// 1. Navidrome playlist (if path matches)
+/// 2. Folder name (if not in music_dir root)
+/// 3. None (standalone track)
+fn determine_playlist_name(
+    path: &Path,
+    music_dir: &Path,
+    path_to_playlist: &HashMap<String, String>,
+) -> Option<String> {
+    // Try to get relative path from music_dir
+    let relative_path = path.strip_prefix(music_dir).ok()?;
+    let relative_str = relative_path.to_str()?;
+
+    // Normalize path separators for matching
+    let normalized = relative_str.replace('\\', "/");
+
+    // Check Navidrome playlist first
+    if let Some(playlist_name) = path_to_playlist.get(&normalized) {
+        return Some(playlist_name.clone());
+    }
+
+    // Fall back to folder-based detection
+    // If track is directly in music_dir, it's a standalone track (no playlist)
+    let parent = path.parent()?;
+    if parent == music_dir {
+        return None; // Standalone track
+    }
+
+    // Use immediate parent folder as playlist name
+    parent
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
 }
 
 /// Analyze a single audio track
@@ -121,20 +214,34 @@ fn analyze_track(
     
     let mut format = probed.format;
     
-    // Get track info
-    let track = format.default_track()
-        .ok_or_else(|| anyhow::anyhow!("No default track"))?;
-    
-    let sample_rate = track.codec_params.sample_rate
-        .ok_or_else(|| anyhow::anyhow!("Unknown sample rate"))?;
-    let bit_depth = track.codec_params.bits_per_sample.unwrap_or(16);
-    
+    // Get track info - extract what we need before mutable borrows
+    let (track_id, sample_rate, bit_depth, bitrate, codec_params) = {
+        let track = format.default_track()
+            .ok_or_else(|| anyhow::anyhow!("No default track"))?;
+        let sample_rate = track.codec_params.sample_rate
+            .ok_or_else(|| anyhow::anyhow!("Unknown sample rate"))?;
+        let bit_depth = track.codec_params.bits_per_sample.unwrap_or(16) as u16;
+        // Extract bitrate in kbps, default to 320 if not available
+        let bitrate = track.codec_params.bits_per_coded_sample
+            .map(|bps| (bps * sample_rate / 1000) as u32)
+            .or_else(|| {
+                // For lossless formats, estimate from sample rate and bit depth
+                match bit_depth {
+                    16 => Some(sample_rate * 16 * 2 / 1000), // stereo 16-bit
+                    24 => Some(sample_rate * 24 * 2 / 1000), // stereo 24-bit
+                    _ => None,
+                }
+            })
+            .unwrap_or(320);
+        (track.id, sample_rate, bit_depth, bitrate, track.codec_params.clone())
+    };
+
     // Create decoder
     let mut decoder = symphonia::default::get_codecs().make(
-        &track.codec_params,
+        &codec_params,
         &DecoderOptions::default(),
     )?;
-    
+
     // Extract metadata
     let (title, artist, album, genre, year, track_number) = extract_metadata(&mut format, path);
     
@@ -159,7 +266,7 @@ fn analyze_track(
             Err(e) => return Err(e.into()),
         };
         
-        if packet.track_id() != track.id {
+        if packet.track_id() != track_id {
             continue;
         }
         
@@ -207,10 +314,12 @@ fn analyze_track(
         duration_secs,
         sample_rate,
         bit_depth,
+        bitrate,
         bpm,
         key,
         beat_grid,
         waveform,
+        cue_points: Vec::new(), // No cue points detected yet (can be added from Navidrome)
         file_size,
         file_hash,
         year,
@@ -423,12 +532,28 @@ fn is_audio_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use tempfile::TempDir;
+    use std::fs::File;
+
     #[test]
     fn test_is_audio_file() {
-        assert!(is_audio_file(Path::new("test.mp3")));
-        assert!(is_audio_file(Path::new("TEST.FLAC")));
-        assert!(!is_audio_file(Path::new("test.txt")));
-        assert!(!is_audio_file(Path::new("test")));
+        let tmp = TempDir::new().unwrap();
+
+        // Create test files
+        let mp3_path = tmp.path().join("test.mp3");
+        File::create(&mp3_path).unwrap();
+        let flac_path = tmp.path().join("TEST.FLAC");
+        File::create(&flac_path).unwrap();
+        let txt_path = tmp.path().join("test.txt");
+        File::create(&txt_path).unwrap();
+        let no_ext_path = tmp.path().join("test");
+        File::create(&no_ext_path).unwrap();
+
+        assert!(is_audio_file(&mp3_path));
+        assert!(is_audio_file(&flac_path));
+        assert!(!is_audio_file(&txt_path));
+        assert!(!is_audio_file(&no_ext_path));
+        // Non-existent file should return false
+        assert!(!is_audio_file(Path::new("nonexistent.mp3")));
     }
 }

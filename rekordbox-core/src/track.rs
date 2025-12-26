@@ -25,6 +25,8 @@ pub struct TrackAnalysis {
     pub sample_rate: u32,
     /// Bit depth
     pub bit_depth: u16,
+    /// Bitrate in kbps
+    pub bitrate: u32,
     /// BPM (beats per minute)
     pub bpm: f64,
     /// Musical key
@@ -33,6 +35,8 @@ pub struct TrackAnalysis {
     pub beat_grid: BeatGrid,
     /// Waveform data (preview + detail)
     pub waveform: Waveform,
+    /// Cue points (hot cues, memory cues, loops)
+    pub cue_points: Vec<CuePoint>,
     /// File size in bytes
     pub file_size: u64,
     /// XXH3 hash of file for cache invalidation
@@ -170,37 +174,74 @@ impl BeatGrid {
     pub fn constant_tempo(bpm: f64, first_beat_ms: f64, duration_ms: f64) -> Self {
         let beat_duration_ms = 60_000.0 / bpm;
         let tempo_100 = (bpm * 100.0).round() as u16;
-        
+
         let mut beats = Vec::new();
         let mut time = first_beat_ms;
         let mut beat_in_bar = 1u8;
-        
+
         while time < duration_ms {
             beats.push(Beat {
                 beat_number: beat_in_bar,
                 time_ms: time,
                 tempo_100,
             });
-            
+
             time += beat_duration_ms;
             beat_in_bar = if beat_in_bar == 4 { 1 } else { beat_in_bar + 1 };
         }
-        
+
         Self {
             bpm,
             first_beat_ms,
             beats,
         }
     }
-    
+
     /// Number of beats
     pub fn len(&self) -> usize {
         self.beats.len()
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.beats.is_empty()
     }
+}
+
+/// Cue point type
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CueType {
+    /// Regular cue point
+    Cue = 1,
+    /// Fade-in point
+    FadeIn = 2,
+    /// Fade-out point
+    FadeOut = 3,
+    /// Load point (where track starts playing)
+    Load = 4,
+    /// Loop point
+    Loop = 5,
+}
+
+impl Default for CueType {
+    fn default() -> Self {
+        CueType::Cue
+    }
+}
+
+/// Cue point for PCOB section
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CuePoint {
+    /// Hot cue number (0-7 for hot cues, 0 for memory cues)
+    pub hot_cue: u8,
+    /// Cue type
+    pub cue_type: CueType,
+    /// Time in milliseconds from track start
+    pub time_ms: f64,
+    /// Loop length in milliseconds (0 if not a loop)
+    pub loop_ms: f64,
+    /// Optional comment/label
+    pub comment: Option<String>,
 }
 
 /// Waveform data for both preview and detail displays
@@ -294,13 +335,17 @@ mod tests {
     
     #[test]
     fn test_key_camelot() {
-        // A minor = 5A
+        // A minor = 8A (relative minor of C major)
         let am = Key::new(9, false);
-        assert_eq!(am.to_camelot(), "5A");
-        
+        assert_eq!(am.to_camelot(), "8A");
+
         // C major = 8B
         let c = Key::new(0, true);
         assert_eq!(c.to_camelot(), "8B");
+
+        // C minor = 5A
+        let cm = Key::new(0, false);
+        assert_eq!(cm.to_camelot(), "5A");
     }
     
     #[test]

@@ -7,13 +7,10 @@
 //!
 //! Reference: https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/exports.html
 
-use crate::error::{Error, Result};
-
 /// Maximum length for short ASCII strings
 const MAX_SHORT_ASCII_LEN: usize = 126;
 
 /// Flag byte values
-const FLAG_SHORT_ASCII_MASK: u8 = 0x01;
 const FLAG_LONG_ASCII: u8 = 0x40;
 const FLAG_UTF16LE: u8 = 0x90;
 

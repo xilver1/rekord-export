@@ -26,13 +26,23 @@ clap.workspace = true
 
 # Logging
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Errors
 anyhow.workspace = true
 
 # Filesystem
 walkdir.workspace = true
+
+# HTTP client for Navidrome/Subsonic API
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# MD5 for Subsonic auth token
+md-5 = "0.10"
+
+# Random salt generation
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3.13"

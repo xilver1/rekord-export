@@ -1,23 +1,21 @@
 //! rekordbox-cli: Lightweight client for Termux
 //!
-//! Communicates with rekordbox-server over Unix socket.
+//! Communicates with rekordbox-server over TCP socket.
 //! Designed to be tiny (<500KB) for mobile deployment.
-
-use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::net::TcpStream;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
 #[command(name = "rekordbox")]
 #[command(about = "Pioneer DJ export CLI client")]
 struct Args {
-    /// Unix socket path
-    #[arg(short, long, default_value = "/tmp/rekordbox.sock")]
-    socket: PathBuf,
-    
+    /// Server address (host:port)
+    #[arg(short, long, default_value = "127.0.0.1:6969")]
+    server: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -76,15 +74,15 @@ async fn main() -> anyhow::Result<()> {
             path: None,
             output: None,
         },
-        Command::Analyze { path } => Request {
+        Command::Analyze { ref path } => Request {
             method: "analyze".into(),
-            path,
+            path: path.clone(),
             output: None,
         },
-        Command::Export { output } => Request {
+        Command::Export { ref output } => Request {
             method: "export".into(),
             path: None,
-            output: Some(output),
+            output: Some(output.clone()),
         },
         Command::List => Request {
             method: "list_tracks".into(),
@@ -104,10 +102,10 @@ async fn main() -> anyhow::Result<()> {
     };
     
     // Connect to server
-    let stream = match UnixStream::connect(&args.socket).await {
+    let stream = match TcpStream::connect(&args.server).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to connect to server at {:?}: {}", args.socket, e);
+            eprintln!("Failed to connect to server at {}: {}", args.server, e);
             eprintln!("Is rekordbox-server running?");
             std::process::exit(1);
         }
