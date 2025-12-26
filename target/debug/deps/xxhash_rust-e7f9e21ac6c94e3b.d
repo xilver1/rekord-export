@@ -1,0 +1,10 @@
+C:\repos\rekordbox-export\target\debug\deps\libxxhash_rust-e7f9e21ac6c94e3b.rmeta: C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\lib.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\utils.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh32_common.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh64_common.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh3_common.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh3.rs
+
+C:\repos\rekordbox-export\target\debug\deps\xxhash_rust-e7f9e21ac6c94e3b.d: C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\lib.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\utils.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh32_common.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh64_common.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh3_common.rs C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh3.rs
+
+C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\lib.rs:
+C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\utils.rs:
+C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh32_common.rs:
+C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh64_common.rs:
+C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh3_common.rs:
+C:\Users\Fernando\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\xxhash-rust-0.8.15\src\xxh3.rs:

@@ -1,0 +1,43 @@
+[package]
+name = "rekordbox-server"
+version.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "rekordbox-server"
+path = "src/main.rs"
+
+[dependencies]
+rekordbox-core = { path = "../rekordbox-core" }
+
+# Async runtime - single-threaded for memory efficiency
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "macros", "fs"] }
+
+# Audio processing
+symphonia.workspace = true
+rustfft.workspace = true
+spectrum-analyzer.workspace = true
+
+# Serialization  
+serde.workspace = true
+serde_json.workspace = true
+
+# CLI args
+clap.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Errors
+anyhow.workspace = true
+
+# Filesystem
+walkdir.workspace = true
+notify.workspace = true
+
+# Memory efficiency
+memmap2.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"

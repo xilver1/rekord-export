@@ -1,0 +1,244 @@
+//! Unix socket server for CLI communication
+//!
+//! Provides a simple JSON-RPC style interface for the lightweight CLI client.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn, error, debug};
+
+use rekordbox_core::cache::AnalysisCache;
+use crate::config::Config;
+use crate::analyzer;
+use crate::export;
+
+/// Server state
+struct ServerState {
+    config: Config,
+    cache: AnalysisCache,
+}
+
+/// Request from CLI client
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method")]
+enum Request {
+    #[serde(rename = "analyze")]
+    Analyze { path: Option<String> },
+    
+    #[serde(rename = "export")]
+    Export { output: String },
+    
+    #[serde(rename = "status")]
+    Status,
+    
+    #[serde(rename = "cache_stats")]
+    CacheStats,
+    
+    #[serde(rename = "cache_clear")]
+    CacheClear,
+    
+    #[serde(rename = "list_tracks")]
+    ListTracks,
+}
+
+/// Response to CLI client
+#[derive(Debug, Serialize)]
+struct Response {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+}
+
+impl Response {
+    fn ok(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: Some(message.into()),
+            data: None,
+        }
+    }
+    
+    fn ok_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            success: true,
+            message: Some(message.into()),
+            data: Some(data),
+        }
+    }
+    
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: Some(message.into()),
+            data: None,
+        }
+    }
+}
+
+/// Run the server
+pub async fn run(config: Config, cache: AnalysisCache) -> anyhow::Result<()> {
+    let socket_path = &config.socket_path;
+    
+    // Remove existing socket
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+    
+    // Create Unix socket listener
+    let listener = UnixListener::bind(socket_path)?;
+    info!("Server listening on {:?}", socket_path);
+    
+    let state = Arc::new(Mutex::new(ServerState { config, cache }));
+    
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(stream, state).await {
+                        error!("Client error: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("Accept error: {}", e);
+            }
+        }
+    }
+}
+
+/// Handle a single client connection
+async fn handle_client(
+    stream: UnixStream,
+    state: Arc<Mutex<ServerState>>,
+) -> anyhow::Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    
+    while reader.read_line(&mut line).await? > 0 {
+        debug!("Received: {}", line.trim());
+        
+        let response = match serde_json::from_str::<Request>(&line) {
+            Ok(request) => handle_request(request, &state).await,
+            Err(e) => Response::error(format!("Invalid request: {}", e)),
+        };
+        
+        let response_json = serde_json::to_string(&response)?;
+        writer.write_all(response_json.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+        
+        line.clear();
+    }
+    
+    Ok(())
+}
+
+/// Process a request
+async fn handle_request(
+    request: Request,
+    state: &Arc<Mutex<ServerState>>,
+) -> Response {
+    match request {
+        Request::Analyze { path } => {
+            let state = state.lock().await;
+            let music_dir = path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| state.config.music_dir.clone());
+            
+            let config = Config {
+                music_dir,
+                ..state.config.clone()
+            };
+            
+            match analyzer::analyze_directory(&config, &state.cache).await {
+                Ok(tracks) => {
+                    Response::ok_with_data(
+                        format!("Analyzed {} tracks", tracks.len()),
+                        serde_json::json!({
+                            "track_count": tracks.len(),
+                            "tracks": tracks.iter().map(|t| serde_json::json!({
+                                "id": t.id,
+                                "title": t.title,
+                                "artist": t.artist,
+                                "bpm": t.bpm,
+                                "key": t.key.map(|k| k.to_camelot()),
+                            })).collect::<Vec<_>>()
+                        })
+                    )
+                }
+                Err(e) => Response::error(format!("Analysis failed: {}", e)),
+            }
+        }
+        
+        Request::Export { output } => {
+            let state = state.lock().await;
+            let output_path = std::path::Path::new(&output);
+            
+            // First analyze
+            match analyzer::analyze_directory(&state.config, &state.cache).await {
+                Ok(tracks) => {
+                    match export::export_usb(&tracks, output_path) {
+                        Ok(()) => Response::ok(format!("Exported {} tracks to {}", tracks.len(), output)),
+                        Err(e) => Response::error(format!("Export failed: {}", e)),
+                    }
+                }
+                Err(e) => Response::error(format!("Analysis failed: {}", e)),
+            }
+        }
+        
+        Request::Status => {
+            Response::ok("Server running")
+        }
+        
+        Request::CacheStats => {
+            let state = state.lock().await;
+            match state.cache.stats() {
+                Ok(stats) => Response::ok_with_data(
+                    "Cache statistics",
+                    serde_json::json!({
+                        "entries": stats.entry_count,
+                        "size_bytes": stats.total_size_bytes,
+                        "size_mb": stats.total_size_bytes as f64 / 1024.0 / 1024.0,
+                    })
+                ),
+                Err(e) => Response::error(format!("Failed to get cache stats: {}", e)),
+            }
+        }
+        
+        Request::CacheClear => {
+            let state = state.lock().await;
+            match state.cache.clear() {
+                Ok(()) => Response::ok("Cache cleared"),
+                Err(e) => Response::error(format!("Failed to clear cache: {}", e)),
+            }
+        }
+        
+        Request::ListTracks => {
+            let state = state.lock().await;
+            match analyzer::analyze_directory(&state.config, &state.cache).await {
+                Ok(tracks) => Response::ok_with_data(
+                    format!("{} tracks found", tracks.len()),
+                    serde_json::json!(tracks.iter().map(|t| serde_json::json!({
+                        "id": t.id,
+                        "path": t.file_path,
+                        "title": t.title,
+                        "artist": t.artist,
+                        "album": t.album,
+                        "bpm": t.bpm,
+                        "key": t.key.map(|k| k.to_camelot()),
+                        "duration": t.duration_secs,
+                    })).collect::<Vec<_>>())
+                ),
+                Err(e) => Response::error(format!("Failed to list tracks: {}", e)),
+            }
+        }
+    }
+}

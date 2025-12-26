@@ -1,0 +1,13 @@
+[package]
+name = "rekordbox-core"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+binrw.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1.4"

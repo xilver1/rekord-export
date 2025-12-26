@@ -1,0 +1,63 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   C:\repos\rekord-export\rekordbox-cli\Cargo.toml
+workspace: C:\repos\rekord-export\Cargo.toml
+   0.082608300s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint: fingerprint error for rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)/Check { test: false }/TargetInner { name: "rbx", doc: true, ..: with_path("C:\\repos\\rekord-export\\rekordbox-cli\\src\\main.rs", Edition2021) }
+   0.082652900s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\repos\rekord-export\target\debug\.fingerprint\rekordbox-cli-fbdd6e27f8efb67d\bin-rbx`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_path
+   6: git_filter_source_path
+   7: git_filter_source_path
+   8: git_filter_source_path
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   0.102013700s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint: fingerprint error for rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)/Check { test: true }/TargetInner { name: "rbx", doc: true, ..: with_path("C:\\repos\\rekord-export\\rekordbox-cli\\src\\main.rs", Edition2021) }
+   0.102039700s  INFO prepare_target{force=false package_id=rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli) target="rbx"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\repos\rekord-export\target\debug\.fingerprint\rekordbox-cli-9e1cceea4853f442\test-bin-rbx`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_path
+   6: git_filter_source_path
+   7: git_filter_source_path
+   8: git_filter_source_path
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+    Checking rekordbox-cli v0.1.0 (C:\repos\rekord-export\rekordbox-cli)
+error: could not compile `rekordbox-cli` (bin "rbx" test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `rekordbox-cli` (bin "rbx") due to 1 previous error
