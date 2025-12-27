@@ -19,6 +19,8 @@ pub struct TrackAnalysis {
     pub album: Option<String>,
     /// Genre
     pub genre: Option<String>,
+    /// Record label
+    pub label: Option<String>,
     /// Track duration in seconds
     pub duration_secs: f64,
     /// Sample rate in Hz
@@ -135,6 +137,34 @@ impl Key {
         }
     }
     
+    /// Create a Key from Rekordbox's internal key ID (1-24)
+    /// Inverse of to_rekordbox_id()
+    pub fn from_rekordbox_id(id: u8) -> Self {
+        // Inverse mapping: rekordbox_id -> pitch_class
+        // Index 0 is unused, 1-12 are minor keys, 13-24 are major keys
+        let inverse_map: [u8; 13] = [0, 0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5];
+        
+        if id == 0 {
+            // No key
+            Self { pitch_class: 0, is_major: false }
+        } else if id <= 12 {
+            // Minor key
+            Self {
+                pitch_class: inverse_map[id as usize],
+                is_major: false,
+            }
+        } else if id <= 24 {
+            // Major key (subtract 12 to get the index)
+            Self {
+                pitch_class: inverse_map[(id - 12) as usize],
+                is_major: true,
+            }
+        } else {
+            // Invalid ID, return C minor as fallback
+            Self { pitch_class: 0, is_major: false }
+        }
+    }
+    
     /// Get the key name (e.g., "Am", "C")
     pub fn name(&self) -> String {
         let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -229,10 +259,49 @@ impl Default for CueType {
     }
 }
 
-/// Cue point for PCOB section
+/// Hot cue color palette (63 colors supported by CDJs)
+/// Common colors: Green=0x00, Cyan=0x09, Orange=0x22, Red=0x2A, Purple=0x3E
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HotCueColor {
+    /// Palette index (0x00-0x3E, 63 colors total)
+    pub palette_index: u8,
+    /// RGB values for LED illumination
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl HotCueColor {
+    /// Standard hot cue colors with their palette indices
+    pub const GREEN: HotCueColor = HotCueColor { palette_index: 0x00, red: 0x28, green: 0xE2, blue: 0x14 };
+    pub const CYAN: HotCueColor = HotCueColor { palette_index: 0x09, red: 0x00, green: 0xE0, blue: 0xFF };
+    pub const BLUE: HotCueColor = HotCueColor { palette_index: 0x11, red: 0x00, green: 0x50, blue: 0xFF };
+    pub const PURPLE: HotCueColor = HotCueColor { palette_index: 0x3E, red: 0x64, green: 0x73, blue: 0xFF };
+    pub const PINK: HotCueColor = HotCueColor { palette_index: 0x1A, red: 0xFF, green: 0x00, blue: 0xC8 };
+    pub const RED: HotCueColor = HotCueColor { palette_index: 0x2A, red: 0xE6, green: 0x28, blue: 0x28 };
+    pub const ORANGE: HotCueColor = HotCueColor { palette_index: 0x22, red: 0xFF, green: 0xA0, blue: 0x00 };
+    pub const YELLOW: HotCueColor = HotCueColor { palette_index: 0x32, red: 0xFF, green: 0xFF, blue: 0x00 };
+
+    /// Get default color for a hot cue slot (A-H)
+    pub fn default_for_slot(slot: u8) -> Self {
+        match slot {
+            1 => Self::GREEN,
+            2 => Self::CYAN,
+            3 => Self::BLUE,
+            4 => Self::PURPLE,
+            5 => Self::PINK,
+            6 => Self::RED,
+            7 => Self::ORANGE,
+            8 => Self::YELLOW,
+            _ => Self::GREEN,
+        }
+    }
+}
+
+/// Cue point for PCOB/PCO2 section
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CuePoint {
-    /// Hot cue number (0-7 for hot cues, 0 for memory cues)
+    /// Hot cue number (0 for memory cue, 1-8 for hot cue A-H)
     pub hot_cue: u8,
     /// Cue type
     pub cue_type: CueType,
@@ -242,15 +311,70 @@ pub struct CuePoint {
     pub loop_ms: f64,
     /// Optional comment/label
     pub comment: Option<String>,
+    /// Hot cue color (for PCO2 extended format)
+    pub color: Option<HotCueColor>,
 }
 
 /// Waveform data for both preview and detail displays
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Waveform {
-    /// Preview waveform (400 entries, monochrome)
+    /// Preview waveform (400 entries, monochrome) - PWAV format
     pub preview: WaveformPreview,
-    /// Detail color waveform (150 entries/second)
+    /// Color preview waveform (1200 entries, 6 bytes each) - PWV4 format
+    pub color_preview: WaveformColorPreview,
+    /// Detail color waveform (150 entries/second) - PWV5 format
     pub detail: WaveformDetail,
+}
+
+/// Color preview waveform (PWV4 format - 1200 columns, 6 bytes each)
+/// Used by CDJ-2000NXS2, CDJ-3000, XDJ-XZ for the waveform overview display
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WaveformColorPreview {
+    /// 1200 columns for the preview display
+    pub columns: Vec<WaveformColorPreviewColumn>,
+}
+
+/// Single column in PWV4 color preview waveform
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct WaveformColorPreviewColumn {
+    /// Height value (7 bits, 0-127)
+    pub height: u8,
+    /// Luminance boost factor (0-127)
+    pub luminance: u8,
+    /// Blue intensity (bass, 7 bits)
+    pub blue: u8,
+    /// Red intensity (7 bits)
+    pub red: u8,
+    /// Green intensity (7 bits)
+    pub green: u8,
+    /// Blue2/additional (7 bits)
+    pub blue2: u8,
+}
+
+impl WaveformColorPreviewColumn {
+    /// Encode to PWV4 6-byte format
+    pub fn to_bytes(&self) -> [u8; 6] {
+        [
+            self.height & 0x7F,
+            self.luminance & 0x7F,
+            self.blue & 0x7F,
+            self.red & 0x7F,
+            self.green & 0x7F,
+            self.blue2 & 0x7F,
+        ]
+    }
+
+    /// Decode from PWV4 bytes
+    pub fn from_bytes(bytes: [u8; 6]) -> Self {
+        Self {
+            height: bytes[0] & 0x7F,
+            luminance: bytes[1] & 0x7F,
+            blue: bytes[2] & 0x7F,
+            red: bytes[3] & 0x7F,
+            green: bytes[4] & 0x7F,
+            blue2: bytes[5] & 0x7F,
+        }
+    }
 }
 
 /// Preview waveform (PWAV format - 400 bytes total)

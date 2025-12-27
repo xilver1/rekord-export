@@ -10,17 +10,19 @@
 //! Reference: https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html
 
 use crate::error::Result;
-use crate::track::{BeatGrid, Waveform, WaveformPreview, WaveformDetail, CuePoint, CueType};
+use crate::track::{BeatGrid, Waveform, WaveformPreview, WaveformDetail, WaveformColorPreview,
+                   CuePoint, CueType, HotCueColor};
 
 /// Section tags (4 bytes each)
 const PMAI_TAG: &[u8; 4] = b"PMAI";
 const PQTZ_TAG: &[u8; 4] = b"PQTZ";
 const PWAV_TAG: &[u8; 4] = b"PWAV";
 const PWV3_TAG: &[u8; 4] = b"PWV3"; // 3-band waveform for NXS compatibility
+const PWV4_TAG: &[u8; 4] = b"PWV4"; // Color preview waveform (1200×6 bytes)
 const PWV5_TAG: &[u8; 4] = b"PWV5";
 const PPTH_TAG: &[u8; 4] = b"PPTH";
-const PCOB_TAG: &[u8; 4] = b"PCOB"; // Cue/loop points
-const PCO2_TAG: &[u8; 4] = b"PCO2"; // Extended cue points (Nexus 2)
+const PCOB_TAG: &[u8; 4] = b"PCOB"; // Cue/loop points (basic)
+const PCO2_TAG: &[u8; 4] = b"PCO2"; // Extended cue points with colors (Nexus 2+)
 
 /// Generate a complete ANLZ .DAT file
 pub fn generate_dat_file(
@@ -227,6 +229,165 @@ fn generate_pwv3_section(detail: &WaveformDetail) -> Vec<u8> {
     buffer
 }
 
+/// Generate PWV4 (color preview waveform) section
+/// 1200 fixed columns, 6 bytes per entry
+fn generate_pwv4_section(color_preview: &WaveformColorPreview) -> Vec<u8> {
+    let mut buffer = Vec::new();
+
+    // Tag
+    buffer.extend_from_slice(PWV4_TAG);
+
+    // Header: 4 (tag) + 4 (header_len) + 4 (section_len) + 4 (entry_count) + 4 (unknown) = 20 bytes
+    let header_len = 20u32 - 4;
+    let data_size = 1200 * 6; // Always 1200 entries, 6 bytes each
+    let section_len = 20 + data_size;
+
+    buffer.extend_from_slice(&header_len.to_be_bytes());
+    buffer.extend_from_slice(&(section_len as u32).to_be_bytes());
+
+    // Entry count (always 1200)
+    buffer.extend_from_slice(&1200u32.to_be_bytes());
+
+    // Unknown
+    buffer.extend_from_slice(&0u32.to_be_bytes());
+
+    // Write exactly 1200 color preview entries
+    for i in 0..1200 {
+        let entry = if i < color_preview.columns.len() {
+            color_preview.columns[i].to_bytes()
+        } else {
+            [0u8; 6]
+        };
+        buffer.extend_from_slice(&entry);
+    }
+
+    buffer
+}
+
+/// Generate PCO2 (extended cue points with colors) section
+/// Used by CDJ-2000NXS2 and later for hot cue colors
+fn generate_pco2_section(cue_points: &[CuePoint]) -> Vec<u8> {
+    if cue_points.is_empty() {
+        return Vec::new();
+    }
+
+    let mut buffer = Vec::new();
+
+    // Separate memory cues and hot cues
+    let hot_cues: Vec<_> = cue_points.iter().filter(|c| c.hot_cue > 0).collect();
+    let memory_cues: Vec<_> = cue_points.iter().filter(|c| c.hot_cue == 0).collect();
+
+    // Generate hot cue entries
+    if !hot_cues.is_empty() {
+        let section = generate_pco2_entries(&hot_cues, true);
+        buffer.extend_from_slice(&section);
+    }
+
+    // Generate memory cue entries  
+    if !memory_cues.is_empty() {
+        let section = generate_pco2_entries(&memory_cues, false);
+        buffer.extend_from_slice(&section);
+    }
+
+    buffer
+}
+
+/// Generate PCO2 entries for a specific cue type
+fn generate_pco2_entries(cues: &[&CuePoint], is_hot_cue: bool) -> Vec<u8> {
+    let mut buffer = Vec::new();
+
+    // PCO2 section header
+    buffer.extend_from_slice(PCO2_TAG);
+
+    // Calculate entry sizes
+    // Each extended entry is at least 56 bytes for hot cues (with color)
+    let base_entry_size = if is_hot_cue { 56usize } else { 40usize };
+    let entries_size: usize = cues.iter().map(|cue| {
+        let comment_len = cue.comment.as_ref().map(|c| c.len() + 4).unwrap_or(0);
+        base_entry_size + comment_len
+    }).sum();
+
+    // Header: 4 (tag) + 4 (header_len) + 4 (section_len) + 4 (type) + 2 (unknown) + 2 (count) = 20 bytes
+    let header_len = 20u32 - 4;
+    let section_len = 20 + entries_size;
+
+    buffer.extend_from_slice(&header_len.to_be_bytes());
+    buffer.extend_from_slice(&(section_len as u32).to_be_bytes());
+
+    // Type: 0 = memory cues, 1 = hot cues
+    buffer.extend_from_slice(&(if is_hot_cue { 1u32 } else { 0u32 }).to_be_bytes());
+
+    // Unknown (2 bytes) + count (2 bytes)
+    buffer.extend_from_slice(&0u16.to_be_bytes());
+    buffer.extend_from_slice(&(cues.len() as u16).to_be_bytes());
+
+    // Write cue entries
+    for cue in cues {
+        // Entry tag "PCP2"
+        buffer.extend_from_slice(b"PCP2");
+
+        // Calculate entry length
+        let comment_len = cue.comment.as_ref().map(|c| c.len() + 4).unwrap_or(0);
+        let entry_len = if is_hot_cue { 56 + comment_len } else { 40 + comment_len };
+        buffer.extend_from_slice(&((entry_len - 4) as u32).to_be_bytes());
+
+        // Hot cue number (0 for memory, 1-8 for hot cue A-H)
+        buffer.extend_from_slice(&(cue.hot_cue as u32).to_be_bytes());
+
+        // Type: 1=cue, 2=loop, 3=fade-in, etc.
+        let cue_type_byte: u32 = match cue.cue_type {
+            CueType::Cue => 1,
+            CueType::Loop => 2,
+            CueType::FadeIn => 3,
+            CueType::FadeOut => 4,
+            CueType::Load => 5,
+        };
+        buffer.extend_from_slice(&cue_type_byte.to_be_bytes());
+
+        // Time position in milliseconds
+        buffer.extend_from_slice(&(cue.time_ms as u32).to_be_bytes());
+
+        // Loop end time (0xFFFFFFFF if not a loop)
+        if cue.loop_ms > 0.0 {
+            buffer.extend_from_slice(&((cue.time_ms + cue.loop_ms) as u32).to_be_bytes());
+        } else {
+            buffer.extend_from_slice(&0xFFFFFFFFu32.to_be_bytes());
+        }
+
+        // Color ID for memory cues (4 bytes) - default to 0
+        buffer.extend_from_slice(&0u32.to_be_bytes());
+
+        // Unknown bytes (8 bytes padding)
+        buffer.extend_from_slice(&[0u8; 8]);
+
+        // Comment (if present)
+        if let Some(ref comment) = cue.comment {
+            // Comment length including null terminator
+            buffer.extend_from_slice(&((comment.len() + 1) as u32).to_be_bytes());
+            buffer.extend_from_slice(comment.as_bytes());
+            buffer.push(0); // Null terminator
+        }
+
+        // Hot cue color data (for hot cues only)
+        if is_hot_cue {
+            let color = cue.color.unwrap_or_else(|| HotCueColor::default_for_slot(cue.hot_cue));
+            
+            // Color palette index (1 byte)
+            buffer.push(color.palette_index);
+            
+            // RGB values (3 bytes)
+            buffer.push(color.red);
+            buffer.push(color.green);
+            buffer.push(color.blue);
+
+            // Padding to align
+            buffer.extend_from_slice(&[0u8; 4]);
+        }
+    }
+
+    buffer
+}
+
 /// Generate PCOB (cue/loop points) section
 fn generate_pcob_section(cue_points: &[CuePoint]) -> Vec<u8> {
     let mut buffer = Vec::new();
@@ -307,7 +468,8 @@ pub fn generate_anlz_full_path(usb_root: &str, track_id: u32) -> String {
 /// Generate .EXT file (extended analysis for Nexus+ players)
 /// Includes additional sections not present in .DAT:
 /// - PWV3: 3-band waveform for NXS compatibility
-/// - PCOB: Cue and loop points
+/// - PWV4: Color preview waveform (1200 columns)
+/// - PCO2: Extended cue points with colors
 pub fn generate_ext_file(
     beat_grid: &BeatGrid,
     waveform: &Waveform,
@@ -321,9 +483,15 @@ pub fn generate_ext_file(
     let pqtz_section = generate_pqtz_section(beat_grid);
     let pwav_section = generate_pwav_section(&waveform.preview);
     let pwv3_section = generate_pwv3_section(&waveform.detail);
+    let pwv4_section = generate_pwv4_section(&waveform.color_preview);
     let pwv5_section = generate_pwv5_section(&waveform.detail);
     let pcob_section = if !cue_points.is_empty() {
         generate_pcob_section(cue_points)
+    } else {
+        Vec::new()
+    };
+    let pco2_section = if !cue_points.is_empty() {
+        generate_pco2_section(cue_points)
     } else {
         Vec::new()
     };
@@ -333,8 +501,10 @@ pub fn generate_ext_file(
         + pqtz_section.len()
         + pwav_section.len()
         + pwv3_section.len()
+        + pwv4_section.len()
         + pwv5_section.len()
-        + pcob_section.len();
+        + pcob_section.len()
+        + pco2_section.len();
     let header_size = 28; // PMAI header
     let total_size = header_size + sections_size;
 
@@ -352,14 +522,31 @@ pub fn generate_ext_file(
     // Write sections (order matters for some players)
     buffer.extend_from_slice(&ppth_section); // Path first
     buffer.extend_from_slice(&pqtz_section); // Beat grid
-    buffer.extend_from_slice(&pwav_section); // Preview waveform
+    buffer.extend_from_slice(&pwav_section); // Preview waveform (monochrome)
     buffer.extend_from_slice(&pwv3_section); // 3-band waveform (NXS compat)
-    buffer.extend_from_slice(&pwv5_section); // Color waveform (NXS2/3000)
+    buffer.extend_from_slice(&pwv4_section); // Color preview (NXS2/3000)
+    buffer.extend_from_slice(&pwv5_section); // Color detail (NXS2/3000)
     if !pcob_section.is_empty() {
-        buffer.extend_from_slice(&pcob_section); // Cue points
+        buffer.extend_from_slice(&pcob_section); // Basic cue points
+    }
+    if !pco2_section.is_empty() {
+        buffer.extend_from_slice(&pco2_section); // Extended cue points with colors
     }
 
     Ok(buffer)
+}
+
+/// Generate .2EX file (second extended analysis for CDJ-3000)
+/// This file contains additional analysis data for newer hardware
+pub fn generate_2ex_file(
+    beat_grid: &BeatGrid,
+    waveform: &Waveform,
+    file_path: &str,
+    cue_points: &[CuePoint],
+) -> Result<Vec<u8>> {
+    // .2EX files have the same structure as .EXT but may include additional tags
+    // For now, generate the same content as EXT with extended color support
+    generate_ext_file(beat_grid, waveform, file_path, cue_points)
 }
 
 #[cfg(test)]

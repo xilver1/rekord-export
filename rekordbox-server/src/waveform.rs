@@ -4,7 +4,8 @@
 //! for frequency band separation (bass/mid/high → red/green/blue).
 
 use rustfft::{FftPlanner, num_complex::Complex};
-use rekordbox_core::{Waveform, WaveformPreview, WaveformDetail, WaveformColumn, WaveformColorEntry};
+use rekordbox_core::{Waveform, WaveformPreview, WaveformDetail, WaveformColumn, WaveformColorEntry,
+                     WaveformColorPreview, WaveformColorPreviewColumn};
 
 /// Waveform generator with FFT support
 pub struct WaveformGenerator {
@@ -16,12 +17,124 @@ impl WaveformGenerator {
         Self { sample_rate }
     }
     
-    /// Generate both preview and detail waveforms
+    /// Generate all waveform types (preview, color preview, and detail)
     pub fn generate(&self, samples: &[f32], duration_secs: f64) -> Waveform {
         let preview = self.generate_preview(samples);
+        let color_preview = self.generate_color_preview(samples);
         let detail = self.generate_detail(samples, duration_secs);
         
-        Waveform { preview, detail }
+        Waveform { preview, color_preview, detail }
+    }
+
+    /// Generate 1200-column color preview waveform (PWV4 format)
+    fn generate_color_preview(&self, samples: &[f32]) -> WaveformColorPreview {
+        let mut columns = Vec::with_capacity(1200);
+
+        if samples.is_empty() {
+            return WaveformColorPreview {
+                columns: vec![WaveformColorPreviewColumn::default(); 1200],
+            };
+        }
+
+        // FFT setup for frequency analysis
+        let fft_size = 1024;
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
+
+        // Hann window
+        let window: Vec<f32> = (0..fft_size)
+            .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos()))
+            .collect();
+
+        // Frequency bin ranges
+        let bin_hz = self.sample_rate as f32 / fft_size as f32;
+        let bass_start = (20.0 / bin_hz).ceil() as usize;
+        let bass_end = (200.0 / bin_hz) as usize;
+        let mid_end = (4000.0 / bin_hz) as usize;
+        let high_end = std::cmp::min((20000.0 / bin_hz) as usize, fft_size / 2);
+
+        // Divide samples into 1200 segments
+        let segment_size = samples.len() / 1200;
+        if segment_size == 0 {
+            return WaveformColorPreview {
+                columns: vec![WaveformColorPreviewColumn::default(); 1200],
+            };
+        }
+
+        for i in 0..1200 {
+            let start = i * segment_size;
+            let end = std::cmp::min(start + segment_size, samples.len());
+            
+            if start >= samples.len() {
+                columns.push(WaveformColorPreviewColumn::default());
+                continue;
+            }
+
+            // Get FFT window centered on this segment
+            let mut fft_buffer: Vec<Complex<f32>> = (0..fft_size)
+                .map(|j| {
+                    let sample_idx = start + j;
+                    let sample = if sample_idx < samples.len() {
+                        samples[sample_idx]
+                    } else {
+                        0.0
+                    };
+                    Complex::new(sample * window[j], 0.0)
+                })
+                .collect();
+
+            fft.process(&mut fft_buffer);
+
+            // Calculate energy for each band
+            let bass_range = bass_start.max(1)..=bass_end.min(fft_size / 2);
+            let mid_range = (bass_end + 1)..=mid_end.min(fft_size / 2);
+            let high_range = (mid_end + 1)..=high_end.min(fft_size / 2);
+
+            let bass_energy: f32 = if bass_range.is_empty() { 0.0 } else {
+                fft_buffer[bass_range.clone()]
+                    .iter()
+                    .map(|c| c.norm())
+                    .sum::<f32>() / (bass_range.end() - bass_range.start() + 1) as f32
+            };
+
+            let mid_energy: f32 = if mid_range.is_empty() { 0.0 } else {
+                fft_buffer[mid_range.clone()]
+                    .iter()
+                    .map(|c| c.norm())
+                    .sum::<f32>() / (mid_range.end() - mid_range.start() + 1) as f32
+            };
+
+            let high_energy: f32 = if high_range.is_empty() { 0.0 } else {
+                fft_buffer[high_range.clone()]
+                    .iter()
+                    .map(|c| c.norm())
+                    .sum::<f32>() / (high_range.end() - high_range.start() + 1) as f32
+            };
+
+            // Calculate RMS for height
+            let segment = &samples[start..end];
+            let rms: f32 = (segment.iter().map(|s| s * s).sum::<f32>() / segment.len() as f32).sqrt();
+
+            // Scale values for PWV4 format (7-bit values, 0-127)
+            let boost = 16.0;
+            let height = (rms * 127.0 * 4.0).clamp(0.0, 127.0) as u8;
+            let luminance = ((bass_energy + mid_energy + high_energy) * boost).clamp(0.0, 127.0) as u8;
+            let blue = (bass_energy * boost * 2.0).clamp(0.0, 127.0) as u8;
+            let red = (bass_energy * boost).clamp(0.0, 127.0) as u8;
+            let green = (mid_energy * boost * 1.5).clamp(0.0, 127.0) as u8;
+            let blue2 = (high_energy * boost * 2.0).clamp(0.0, 127.0) as u8;
+
+            columns.push(WaveformColorPreviewColumn {
+                height,
+                luminance,
+                blue,
+                red,
+                green,
+                blue2,
+            });
+        }
+
+        WaveformColorPreview { columns }
     }
     
     /// Generate 400-column preview waveform (PWAV format)

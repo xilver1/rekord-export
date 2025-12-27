@@ -215,7 +215,7 @@ fn analyze_track(
     let mut format = probed.format;
     
     // Get track info - extract what we need before mutable borrows
-    let (track_id, sample_rate, bit_depth, bitrate, codec_params) = {
+    let (codec_track_id, sample_rate, bit_depth, bitrate, codec_params) = {
         let track = format.default_track()
             .ok_or_else(|| anyhow::anyhow!("No default track"))?;
         let sample_rate = track.codec_params.sample_rate
@@ -266,7 +266,7 @@ fn analyze_track(
             Err(e) => return Err(e.into()),
         };
         
-        if packet.track_id() != track_id {
+        if packet.track_id() != codec_track_id {
             continue;
         }
         
@@ -311,6 +311,7 @@ fn analyze_track(
         artist,
         album,
         genre,
+        label: None, // Could be extracted from metadata if available
         duration_secs,
         sample_rate,
         bit_depth,

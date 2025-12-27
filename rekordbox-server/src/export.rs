@@ -3,6 +3,8 @@
 //! Creates the complete Pioneer-compatible USB directory structure:
 //! - PIONEER/rekordbox/export.pdb
 //! - PIONEER/USBANLZ/Pxxx/[hex]/ANLZ0000.DAT
+//! - PIONEER/DEVSETTING.DAT
+//! - PIONEER/djprofile.nxs
 //! - Contents/[audio files]
 
 use std::collections::HashMap;
@@ -15,7 +17,8 @@ use walkdir::WalkDir;
 
 use rekordbox_core::{
     PdbBuilder, TrackAnalysis,
-    generate_dat_file, generate_ext_file, generate_anlz_path,
+    generate_dat_file, generate_ext_file, generate_2ex_file, generate_anlz_path,
+    generate_devsetting, generate_djprofile,
 };
 
 /// Export analyzed tracks to Pioneer USB format
@@ -24,6 +27,17 @@ pub fn export_usb(
     playlists: &HashMap<String, Vec<u32>>,
     source_dir: &Path,
     output_dir: &Path,
+) -> anyhow::Result<()> {
+    export_usb_with_profile(tracks, playlists, source_dir, output_dir, "rekord-export")
+}
+
+/// Export analyzed tracks with custom DJ profile name
+pub fn export_usb_with_profile(
+    tracks: &[TrackAnalysis],
+    playlists: &HashMap<String, Vec<u32>>,
+    source_dir: &Path,
+    output_dir: &Path,
+    profile_name: &str,
 ) -> anyhow::Result<()> {
     info!("Exporting {} tracks in {} playlists to {:?}",
           tracks.len(), playlists.len(), output_dir);
@@ -65,6 +79,20 @@ pub fn export_usb(
     pdb_file.write_all(&pdb_data)?;
     info!("Wrote export.pdb ({} bytes, {} pages)", pdb_data.len(), pdb_data.len() / 4096);
     
+    // Write DEVSETTING.DAT
+    let devsetting_data = generate_devsetting();
+    let devsetting_path = pioneer_dir.join("DEVSETTING.DAT");
+    let mut devsetting_file = File::create(&devsetting_path)?;
+    devsetting_file.write_all(&devsetting_data)?;
+    debug!("Wrote DEVSETTING.DAT ({} bytes)", devsetting_data.len());
+    
+    // Write djprofile.nxs
+    let djprofile_data = generate_djprofile(profile_name);
+    let djprofile_path = pioneer_dir.join("djprofile.nxs");
+    let mut djprofile_file = File::create(&djprofile_path)?;
+    djprofile_file.write_all(&djprofile_data)?;
+    debug!("Wrote djprofile.nxs ({} bytes)", djprofile_data.len());
+    
     // Generate ANLZ files for each track
     for track in tracks {
         let anlz_rel_path = generate_anlz_path(track.id);
@@ -99,6 +127,17 @@ pub fn export_usb(
         )?;
         let mut ext_file = File::create(&ext_path)?;
         ext_file.write_all(&ext_data)?;
+
+        // Also generate .2EX file for CDJ-3000 and newer hardware
+        let two_ex_path = anlz_full_path.with_extension("2EX");
+        let two_ex_data = generate_2ex_file(
+            &track.beat_grid,
+            &track.waveform,
+            &usb_file_path,
+            &track.cue_points,
+        )?;
+        let mut two_ex_file = File::create(&two_ex_path)?;
+        two_ex_file.write_all(&two_ex_data)?;
     }
     
     // Copy audio files to Contents directory

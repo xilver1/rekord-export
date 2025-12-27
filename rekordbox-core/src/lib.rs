@@ -15,12 +15,17 @@ pub mod anlz;
 pub mod track;
 pub mod cache;
 pub mod validate;
+pub mod auxiliary;
 
 // Re-exports for convenience
 pub use error::{Error, Result};
 pub use track::{TrackAnalysis, BeatGrid, Beat, Waveform, WaveformPreview, WaveformDetail,
-                WaveformColumn, WaveformColorEntry, Key, FileType, CuePoint, CueType};
+                WaveformColumn, WaveformColorEntry, WaveformColorPreview, WaveformColorPreviewColumn,
+                Key, FileType, CuePoint, CueType, HotCueColor};
 pub use pdb::PdbBuilder;
-pub use anlz::{generate_dat_file, generate_ext_file, generate_anlz_path};
+pub use anlz::{generate_dat_file, generate_ext_file, generate_2ex_file, generate_anlz_path};
 pub use cache::{AnalysisCache, CacheStats, compute_file_hash};
 pub use validate::{validate_pdb, validate_and_print, ValidationResult, PdbStats};
+pub use auxiliary::{generate_devsetting, generate_djprofile, artwork_folder_path,
+                    artwork_thumbnail_name, artwork_full_name, ARTWORK_THUMBNAIL_SIZE,
+                    ARTWORK_FULL_SIZE};
