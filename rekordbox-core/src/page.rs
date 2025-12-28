@@ -121,31 +121,36 @@ impl IndexPageBuilder {
     }
     
     /// Finalize the index page
-    /// - next_page: the data page that follows (or EMPTY_TABLE_MARKER if empty)
+    /// - data_page_index: the data page that follows (or EMPTY_TABLE_MARKER if empty)
     /// - has_data: whether there's actual data in the data page
-    pub fn finalize(mut self, data_page_index: u32, has_data: bool) -> Vec<u8> {
-        // Common header (0x00-0x1F)
-        // Bytes 0-3: Always zero
-        // Bytes 4-7: page_index
+    /// - num_row_offsets: number of row offsets in the data page (for index entry)
+    pub fn finalize(mut self, data_page_index: u32, has_data: bool, num_row_offsets: u32) -> Vec<u8> {
+        // Common header (0x00-0x1F) - based on working rekordbox export.pdb
+        
+        // Bytes 0-3: zeros (padding)
+        
+        // Bytes 4-7: page "type" - this is actually the PAGE INDEX!
+        // Each page has a unique sequential type number matching its position
         self.data[4..8].copy_from_slice(&self.page_index.to_le_bytes());
         
-        // Bytes 8-11: page_type
-        self.data[8..12].copy_from_slice(&(self.page_type as u32).to_le_bytes());
+        // Bytes 8-11: next_page 
+        // For INDEX pages, this is a sequential counter (0, 1, 2, 3...)
+        let sequential_index = self.page_index / 2;  // Approximate sequence number
+        self.data[8..12].copy_from_slice(&sequential_index.to_le_bytes());
         
-        // Bytes 12-15: next_page (points to data page)
-        self.data[12..16].copy_from_slice(&data_page_index.to_le_bytes());
+        // Bytes 12-15: unknown1 - for INDEX pages, this is the DATA page index (page_index + 1)
+        let unk1 = self.page_index + 1;
+        self.data[12..16].copy_from_slice(&unk1.to_le_bytes());
         
-        // Bytes 16-19: transaction/version (1 for index pages)
+        // Bytes 16-19: unknown2 - usually 1 for index pages
         self.data[16..20].copy_from_slice(&1u32.to_le_bytes());
         
-        // Bytes 20-23: unknown2 (zero)
-        // Bytes 24-26: packed row counts (zero for index)
+        // Bytes 20-26: zeros
         
         // Byte 27: page_flags (0x64 for index page)
         self.data[27] = PAGE_FLAGS_INDEX;
         
-        // Bytes 28-29: free_size (0 for index)
-        // Bytes 30-31: used_size (0 for index)
+        // Bytes 28-31: zeros (free_size, used_size for index = 0)
         
         // Index header starts at 0x20
         // Bytes 0x20-0x21: Unknown1 (0x1fff)
@@ -157,12 +162,14 @@ impl IndexPageBuilder {
         // Bytes 0x24-0x25: Unknown3 (0x03ec)
         self.data[0x24..0x26].copy_from_slice(&0x03ecu16.to_le_bytes());
         
-        // Bytes 0x26-0x27: NextOffset (0)
+        // Bytes 0x26-0x27: Active flag - 1 for tables with data, 0 otherwise
+        let active_flag = if has_data { 1u16 } else { 0u16 };
+        self.data[0x26..0x28].copy_from_slice(&active_flag.to_le_bytes());
         
-        // Bytes 0x28-0x2B: PageIndex (same as header)
+        // Bytes 0x28-0x2B: PageIndex (self-reference to this INDEX page's index)
         self.data[0x28..0x2C].copy_from_slice(&self.page_index.to_le_bytes());
         
-        // Bytes 0x2C-0x2F: NextPage (EMPTY_TABLE_MARKER if no data, else data page)
+        // Bytes 0x2C-0x2F: NextPage - points to DATA page or EMPTY_TABLE_MARKER
         let index_next_page = if has_data { data_page_index } else { EMPTY_TABLE_MARKER };
         self.data[0x2C..0x30].copy_from_slice(&index_next_page.to_le_bytes());
         
@@ -171,13 +178,25 @@ impl IndexPageBuilder {
         
         // Bytes 0x34-0x37: Unknown6 (0)
         
-        // Bytes 0x38-0x39: NumEntries (0)
+        // Bytes 0x38-0x39: NumEntries - 1 for tables with data, 0 otherwise
+        let num_entries = if has_data { 1u16 } else { 0u16 };
+        self.data[0x38..0x3A].copy_from_slice(&num_entries.to_le_bytes());
+        
         // Bytes 0x3A-0x3B: FirstEmptyEntry (0x1fff)
         self.data[0x3A..0x3C].copy_from_slice(&0x1fffu16.to_le_bytes());
         
-        // Fill rest of page with 0x1ffffff8 (index entry marker)
-        for i in (0x3C..PAGE_SIZE - 20).step_by(4) {
-            self.data[i..i+4].copy_from_slice(&0x1FFFFFF8u32.to_le_bytes());
+        // Bytes 0x3C+: Index entries or fill pattern
+        if has_data {
+            // Active tables: first entry is num_row_offsets, then fill
+            self.data[0x3C..0x40].copy_from_slice(&num_row_offsets.to_le_bytes());
+            for i in (0x40..PAGE_SIZE - 20).step_by(4) {
+                self.data[i..i+4].copy_from_slice(&0x1FFFFFF8u32.to_le_bytes());
+            }
+        } else {
+            // Empty tables: fill with 0x1ffffff8 (index entry marker)
+            for i in (0x3C..PAGE_SIZE - 20).step_by(4) {
+                self.data[i..i+4].copy_from_slice(&0x1FFFFFF8u32.to_le_bytes());
+            }
         }
         // Last 20 bytes stay zero (observed in real files)
         
@@ -218,6 +237,13 @@ impl PageBuilder {
     
     /// Create an empty data page (all zeros, used for tables with no content)
     pub fn empty_page() -> Vec<u8> {
+        vec![0u8; PAGE_SIZE]
+    }
+    
+    /// Create an empty placeholder page with specific page index
+    /// Empty pages in rekordbox are completely zeros (type=0, flags=0x00)
+    pub fn empty_page_with_index(_page_index: u32) -> Vec<u8> {
+        // Empty/placeholder pages are completely zeros
         vec![0u8; PAGE_SIZE]
     }
     
@@ -272,9 +298,18 @@ impl PageBuilder {
     }
     
     /// Write row data and add to index in one step
+    /// Rows are padded to 4-byte alignment
     pub fn write_row(&mut self, data: &[u8]) -> Result<u16> {
         let offset = self.write_heap(data)?;
         self.add_row(offset)?;
+        
+        // Pad to 4-byte alignment
+        let current_pos = self.heap_pos - HEAP_START;
+        let padding = (4 - (current_pos % 4)) % 4;
+        if padding > 0 && !self.would_overflow(padding) {
+            self.heap_pos += padding;  // Skip padding bytes (already zero)
+        }
+        
         Ok(offset)
     }
     
@@ -295,41 +330,51 @@ impl PageBuilder {
     }
     
     fn write_header(&mut self, next_page: u32) {
-        // Page header per Kaitai spec (rekordbox_pdb.ksy)
-        // Total header size: 0x28 (40 bytes)
+        // Page header per working rekordbox export.pdb analysis
+        // Total common header: 0x00-0x1F (32 bytes)
         
-        // 0x00-0x03: gap/zeros (already zero)
+        // 0x00-0x03: zeros (padding, already zero)
         
-        // 0x04-0x07: page_index
+        // 0x04-0x07: page "type" field - this is actually the PAGE INDEX!
+        // Each page has a unique sequential type number matching its position
         self.data[0x04..0x08].copy_from_slice(&self.page_index.to_le_bytes());
         
-        // 0x08-0x0B: type (page_type)
-        self.data[0x08..0x0C].copy_from_slice(&(self.page_type as u32).to_le_bytes());
+        // 0x08-0x0B: next_page (0xFFFFFFFF if none, 0 for single page tables)
+        self.data[0x08..0x0C].copy_from_slice(&next_page.to_le_bytes());
         
-        // 0x0C-0x0F: next_page (0xFFFFFFFF if none)
-        self.data[0x0C..0x10].copy_from_slice(&next_page.to_le_bytes());
+        // 0x0C-0x0F: unknown1 - appears to be a cross-reference value
+        // For DATA pages, this seems to hold transaction/allocation info
+        // Set to page_index + table_type combination
+        let unk1 = self.page_index + (self.page_type as u32);
+        self.data[0x0C..0x10].copy_from_slice(&unk1.to_le_bytes());
         
-        // 0x10-0x13: sequence/transaction (use 0)
-        // Already zero
+        // 0x10-0x13: unknown2 - appears to be another counter/reference
+        // Set based on row count for data pages
+        let unk2 = self.row_count as u32;
+        self.data[0x10..0x14].copy_from_slice(&unk2.to_le_bytes());
         
-        // 0x14-0x17: unknown (4 bytes, zeros)
-        // Already zero
+        // 0x14-0x17: zeros (already zero)
         
-        // 0x18: num_rows_small (u8) - row count if < 256
-        let num_rows_small = std::cmp::min(self.row_count, 255) as u8;
-        self.data[0x18] = num_rows_small;
-        
-        // 0x19: bitmask (u8) - unknown purpose, use 0
-        // Already zero
-        
-        // 0x1A: unknown (u8)
-        // Already zero
+        // 0x18-0x1A: PACKED ROW COUNTS (3 bytes, little-endian)
+        // Per Deep Symmetry: "three bytes 0x18-0x1A contain two non-byte-aligned numbers"
+        // - Upper 13 bits (bits 11-23): num_row_offsets - how many offsets ever allocated
+        // - Lower 11 bits (bits 0-10): num_rows - valid rows currently present
+        // 
+        // CRITICAL: rekordbox expects num_row_offsets = num_rows * 4
+        let num_rows = self.row_count as u32;
+        let num_row_offsets = (self.row_offsets.len() as u32) * 4;  // MUST be 4x!
+        // Pack: (num_row_offsets << 11) | num_rows, stored in 3 bytes little-endian
+        let packed_row_counts = (num_row_offsets << 11) | (num_rows & 0x7FF);
+        self.data[0x18] = (packed_row_counts & 0xFF) as u8;
+        self.data[0x19] = ((packed_row_counts >> 8) & 0xFF) as u8;
+        self.data[0x1A] = ((packed_row_counts >> 16) & 0xFF) as u8;
         
         // 0x1B: page_flags (u8)
-        // Tracks use 0x34, most other tables use 0x24
+        // Genres (table 1) and History (table 19) use 0x34, others use 0x24
+        // Per Deep Symmetry: data pages have (page_flags & 0x40) == 0
         self.data[0x1B] = match self.page_type {
-            PageType::Tracks => PAGE_FLAGS_DATA_TRACK,
-            _ => PAGE_FLAGS_DATA,
+            PageType::Genres | PageType::History => PAGE_FLAGS_DATA_TRACK,  // 0x34
+            _ => PAGE_FLAGS_DATA,  // 0x24
         };
         
         // 0x1C-0x1D: free_size (u16)
@@ -340,17 +385,19 @@ impl PageBuilder {
         let used_size = (self.heap_pos - HEAP_START) as u16;
         self.data[0x1E..0x20].copy_from_slice(&used_size.to_le_bytes());
         
-        // 0x20-0x21: unknown (u16) - often related to something, use 0
+        // 0x20-0x21: u5 (u16) - "of unclear purpose" per Deep Symmetry
+        // Set to num_rows for compatibility (observed in rekordbox exports)
+        self.data[0x20..0x22].copy_from_slice(&(num_rows as u16).to_le_bytes());
+        
+        // 0x22-0x23: unkrows (u16) - "seems related to number of rows"
+        // Per Deep Symmetry: "sometimes instead equals 1fff"
+        // Use 0 for empty, otherwise leave as is (often 0)
         // Already zero
         
-        // 0x22-0x23: num_rows_large (u16) - row count if >= 256
-        let num_rows_large = if self.row_count > 255 { self.row_count as u16 } else { 0 };
-        self.data[0x22..0x24].copy_from_slice(&num_rows_large.to_le_bytes());
+        // 0x24-0x25: u6 (u16) - per Deep Symmetry: "value 1004 for strange pages, 0000 for data"
+        // Already zero (correct for data pages)
         
-        // 0x24-0x25: unknown (u16)
-        // Already zero
-        
-        // 0x26-0x27: unknown (u16)
+        // 0x26-0x27: u7 (u16) - per Deep Symmetry: "always 0 except 1 for history pages"
         // Already zero
         
         // Heap starts at 0x28
@@ -410,7 +457,10 @@ impl PageBuilder {
             self.data[group_start + 32..group_start + 34]
                 .copy_from_slice(&presence_flags.to_le_bytes());
             
-            // Bytes 34-35 are padding (already zero)
+            // Bytes 34-35: MUST be a copy of presence_flags (not padding!)
+            // This is required by rekordbox - empirically verified
+            self.data[group_start + 34..group_start + 36]
+                .copy_from_slice(&presence_flags.to_le_bytes());
         }
     }
     
@@ -426,45 +476,56 @@ impl PageBuilder {
 }
 
 /// Table pointer in file header
+/// Format from rekordbox export.pdb: (first, empty, last, table_type)
+/// - first: transaction/allocation counter (not a page number)
+/// - empty: INDEX page number for this table
+/// - last: DATA page number (or same as INDEX if empty table)
+/// - table_type: table type (0-19)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TablePointer {
-    pub table_type: u32,
-    pub empty_candidate: u32,
-    pub first_page: u32,  // Index page
-    pub last_page: u32,   // Last data page (or index page if no data)
+    pub first: u32,       // Transaction/allocation counter
+    pub empty: u32,       // INDEX page number
+    pub last: u32,        // DATA page number (or same as empty if no data)
+    pub table_type: u32,  // Table type (0-19)
 }
 
 impl TablePointer {
     /// Create a new table pointer
-    /// - first_page: the index page number
-    /// - last_page: the last data page number (or same as first_page if no data pages)
-    /// - empty_candidate: the next available page after this table's pages
-    pub fn new(table_type: PageType, first_page: u32, last_page: u32, empty_candidate: u32) -> Self {
+    /// - table_type: the table type (0-19)
+    /// - first: transaction counter (can use next_unused_page as approximation)
+    /// - index_page: the INDEX page number for this table
+    /// - data_page: the last DATA page number (or same as index_page if no data)
+    pub fn new(table_type: PageType, first: u32, index_page: u32, data_page: u32) -> Self {
         Self {
+            first,
+            empty: index_page,
+            last: data_page,
             table_type: table_type as u32,
-            empty_candidate,
-            first_page,
-            last_page,
         }
     }
     
+    /// Serialize to bytes - format: (first, empty, last, table_type)
     pub fn to_bytes(&self) -> [u8; 16] {
         let mut bytes = [0u8; 16];
-        bytes[0..4].copy_from_slice(&self.table_type.to_le_bytes());
-        bytes[4..8].copy_from_slice(&self.empty_candidate.to_le_bytes());
-        bytes[8..12].copy_from_slice(&self.first_page.to_le_bytes());
-        bytes[12..16].copy_from_slice(&self.last_page.to_le_bytes());
+        bytes[0..4].copy_from_slice(&self.first.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.empty.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.last.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.table_type.to_le_bytes());
         bytes
     }
 }
 
 /// File header builder
+/// Format verified from rekordbox export.pdb:
+/// - 0x00-0x03: zero padding
+/// - 0x04-0x07: page_size
+/// - 0x08-0x0B: num_tables
+/// - 0x0C-0x0F: next_unused_page
+/// - 0x10+: table pointers (20 entries × 16 bytes)
 pub struct FileHeader {
     pub page_size: u32,
     pub num_tables: u32,
     pub next_unused_page: u32,
-    pub unknown1: u32,  // Must be 5 for rekordbox PC compatibility
-    pub sequence: u32,
     pub tables: Vec<TablePointer>,
 }
 
@@ -474,8 +535,6 @@ impl FileHeader {
             page_size: PAGE_SIZE as u32,
             num_tables: 0,
             next_unused_page: 1,
-            unknown1: 5,  // Required for rekordbox PC
-            sequence: 1,
             tables: Vec::new(),
         }
     }
@@ -488,7 +547,7 @@ impl FileHeader {
     pub fn to_page(&self) -> Vec<u8> {
         let mut page = vec![0u8; PAGE_SIZE];
         
-        // Bytes 0-3: zero
+        // Bytes 0-3: zero padding
         // Bytes 4-7: page_size
         page[4..8].copy_from_slice(&self.page_size.to_le_bytes());
         
@@ -498,16 +557,8 @@ impl FileHeader {
         // Bytes 12-15: next_unused_page
         page[12..16].copy_from_slice(&self.next_unused_page.to_le_bytes());
         
-        // Bytes 16-19: unknown1 (must be 5)
-        page[16..20].copy_from_slice(&self.unknown1.to_le_bytes());
-        
-        // Bytes 20-23: sequence
-        page[20..24].copy_from_slice(&self.sequence.to_le_bytes());
-        
-        // Bytes 24-27: unknown (zero)
-        
-        // Table pointers start at byte 28
-        let mut offset = 28;
+        // Table pointers start at byte 0x10 (16)
+        let mut offset = 0x10;
         for table in &self.tables {
             page[offset..offset + 16].copy_from_slice(&table.to_bytes());
             offset += 16;

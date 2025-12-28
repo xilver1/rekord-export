@@ -27,40 +27,43 @@ USB_ROOT/
 │   ├── DEVSETTING.DAT         # Device settings (140 bytes)
 │   └── djprofile.nxs          # DJ profile name (160 bytes)
 └── Contents/
-    ├── [audio files]          # Flat at root level
-    ├── [Artist]/
-    │   └── [Album]/
-    │       └── [audio files]  # Hierarchical by metadata
-    └── ...
+    └── [audio files]
 ```
 
-## export.pdb File Header (Page 0)
+## PDB Data Page Header (0x28 bytes)
 
-The PDB file header is a 4096-byte page with the following structure:
+**CRITICAL**: The row counts field at bytes 0x18-0x1A must be correctly packed!
 
-| Offset | Size | Description |
-|--------|------|-------------|
-| 0x00 | 4 | Zero padding |
-| 0x04 | 4 | Page size (always 4096 = 0x1000) |
-| 0x08 | 4 | Number of tables (20) |
-| 0x0C | 4 | Next unused page index |
-| 0x10 | 320 | Table pointers (20 × 16 bytes) |
-| 0x150+ | 3760 | Zero padding |
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0x00 | 4 | gap | Always zeros |
+| 0x04 | 4 | page_index | Index of this page in file |
+| 0x08 | 4 | type | Table type (0-19) |
+| 0x0C | 4 | next_page | Next page index (0xFFFFFFFF if last) |
+| 0x10 | 4 | version | Incrementing version counter |
+| 0x14 | 4 | unknown2 | Usually zeros |
+| 0x18 | 3 | row_counts | **PACKED**: upper 13 bits = num_row_offsets, lower 11 bits = num_rows |
+| 0x1B | 1 | page_flags | 0x24 (data) or 0x34 (track data) or 0x64 (index) |
+| 0x1C | 2 | free_size | Available heap space |
+| 0x1E | 2 | used_size | Used heap space |
+| 0x20 | 2 | u5 | Often equals num_rows |
+| 0x22 | 2 | unkrows | Usually 0 or 0x1fff |
+| 0x24 | 2 | u6 | 0 for data pages, 0x1004 for index |
+| 0x26 | 2 | u7 | Usually 0 |
 
-### Table Pointer Format (16 bytes each)
+### Row Counts Packing (bytes 0x18-0x1A)
 
-Each table pointer describes one of the 20 table types:
+```
+packed = (num_row_offsets << 11) | num_rows
+byte[0x18] = packed & 0xFF
+byte[0x19] = (packed >> 8) & 0xFF
+byte[0x1A] = (packed >> 16) & 0xFF
+```
 
-| Offset | Size | Description |
-|--------|------|-------------|
-| 0x00 | 4 | First page index |
-| 0x04 | 4 | Empty candidate (next available page) |
-| 0x08 | 4 | Last page index |
-| 0x0C | 4 | Table type (0-19) |
+- **num_row_offsets** (13 bits): Number of row offsets ever allocated
+- **num_rows** (11 bits): Number of valid rows currently present
 
-**IMPORTANT**: The table_type is in the LAST position, not the first!
-
-Tables are stored in order by type (0, 1, 2, ..., 19).
+⚠️ **If num_row_offsets is 0, rekordbox cannot find any rows and reports corruption!**
 
 ## DEVSETTING.DAT Format (140 bytes) ✅
 
@@ -98,26 +101,6 @@ Tables are stored in order by type (0, 1, 2, ..., 19).
 | 7 | PlaylistTree | ✅ |
 | 8 | PlaylistEntries | ✅ |
 | 13 | Artwork | ✅ |
-
-## Data Page Structure
-
-Each data page (4096 bytes) has:
-
-| Offset | Size | Description |
-|--------|------|-------------|
-| 0x00 | 4 | Zero padding |
-| 0x04 | 4 | Page index |
-| 0x08 | 4 | Page type (0-19) |
-| 0x0C | 4 | Next page index |
-| 0x10 | 4 | Unknown1 |
-| 0x14 | 4 | Unknown2 (transaction counter?) |
-| 0x18 | 3 | Packed row counts |
-| 0x1B | 1 | Page flags (0x24=data, 0x34=track data, 0x64=index) |
-| 0x1C | 2 | Free size |
-| 0x1E | 2 | Used size |
-| 0x20 | 8+ | Index-specific or data-specific header |
-| 0x28+ | ? | Row data (heap, grows forward) |
-| End-36 | 36 | Row group (offsets + presence flags) |
 
 ## ANLZ File Tags
 

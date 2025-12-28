@@ -46,14 +46,19 @@ pub fn export_usb_with_profile(
     validate_usb_target(output_dir)?;
 
     // Create directory structure
+    
     let pioneer_dir = output_dir.join("PIONEER");
     let rekordbox_dir = pioneer_dir.join("rekordbox");
     let anlz_dir = pioneer_dir.join("USBANLZ");
     let contents_dir = output_dir.join("Contents");
+    let artwork_dir = pioneer_dir.join("Artwork");
+    let backup_dir = pioneer_dir.join("DeviceLibBackup");
 
     fs::create_dir_all(&rekordbox_dir)?;
     fs::create_dir_all(&anlz_dir)?;
     fs::create_dir_all(&contents_dir)?;
+    fs::create_dir_all(&artwork_dir)?;
+    fs::create_dir_all(&backup_dir)?;
 
     // Build PDB database
     let mut pdb_builder = PdbBuilder::new();
@@ -172,12 +177,20 @@ pub fn validate_usb_target(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Copy audio files to Contents directory
+/// Copy audio files to Contents directory with hierarchical structure
+/// Creates both:
+/// - Contents/filename.ext (flat, at root)
+/// - Contents/Artist/Album/filename.ext (hierarchical by metadata)
 fn copy_audio_files(
     tracks: &[TrackAnalysis],
     source_dir: &Path,
     contents_dir: &Path,
 ) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    
+    // Track which files we've already copied to avoid duplicates
+    let mut copied_files: HashSet<String> = HashSet::new();
+    
     for track in tracks {
         // Extract filename from USB path
         let filename = Path::new(&track.file_path)
@@ -190,34 +203,90 @@ fn copy_audio_files(
             continue;
         }
         
-        let dest_path = contents_dir.join(filename);
-        
-        // Skip if already exists
-        if dest_path.exists() {
-            debug!("Skipping existing file: {:?}", dest_path);
-            continue;
-        }
-        
         // Find source file
-        let mut found = false;
+        let mut source_path = None;
         for entry in WalkDir::new(source_dir)
             .into_iter()
             .filter_map(|e| e.ok())
         {
             if entry.file_name().to_str() == Some(filename) {
-                fs::copy(entry.path(), &dest_path)?;
-                debug!("Copied: {:?} -> {:?}", entry.path(), dest_path);
-                found = true;
+                source_path = Some(entry.path().to_path_buf());
                 break;
             }
         }
         
-        if !found {
-            warn!("Source file not found for track {}: {}", track.id, filename);
+        let source = match source_path {
+            Some(p) => p,
+            None => {
+                warn!("Source file not found for track {}: {}", track.id, filename);
+                continue;
+            }
+        };
+        
+        // 1. Copy to flat Contents/ directory (root level)
+        let flat_dest = contents_dir.join(filename);
+        if !flat_dest.exists() {
+            fs::copy(&source, &flat_dest)?;
+            debug!("Copied to flat: {:?} -> {:?}", source, flat_dest);
+        }
+        
+        // 2. Copy to hierarchical Artist/Album/ structure
+        let artist = sanitize_path_component(&track.artist);
+        let album = track.album.as_ref()
+            .map(|a| sanitize_path_component(a))
+            .unwrap_or_else(|| "Unknown Album".to_string());
+        
+        if !artist.is_empty() {
+            // Create artist directory
+            let artist_dir = contents_dir.join(&artist);
+            fs::create_dir_all(&artist_dir)?;
+            
+            // Create album directory inside artist
+            let album_dir = artist_dir.join(&album);
+            fs::create_dir_all(&album_dir)?;
+            
+            // Copy file to album directory
+            let hier_dest = album_dir.join(filename);
+            let hier_key = format!("{}/{}/{}", artist, album, filename);
+            
+            if !copied_files.contains(&hier_key) && !hier_dest.exists() {
+                fs::copy(&source, &hier_dest)?;
+                copied_files.insert(hier_key);
+                debug!("Copied to hierarchy: {:?} -> {:?}", source, hier_dest);
+            }
         }
     }
     
     Ok(())
+}
+
+/// Sanitize a string for use as a path component
+/// Removes/replaces characters that are invalid in file/folder names
+fn sanitize_path_component(name: &str) -> String {
+    if name.is_empty() {
+        return "Unknown".to_string();
+    }
+    
+    // Replace invalid characters with underscores
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                '\0' => '_',
+                _ => c,
+            }
+        })
+        .collect();
+    
+    // Trim whitespace and dots from start/end
+    let trimmed = sanitized.trim().trim_matches('.');
+    
+    if trimmed.is_empty() {
+        "Unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg(test)]

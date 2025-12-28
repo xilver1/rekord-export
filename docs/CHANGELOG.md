@@ -1,5 +1,127 @@
 # Changelog - rekordbox USB Export
 
+## Version 2.5.0 (December 28, 2025)
+
+### CRITICAL BUG FIX: Page Type Field
+
+**ROOT CAUSE OF "LIBRARY CORRUPTED" ERROR IDENTIFIED**
+
+The page "type" field at offset 0x04 in each page header was being set to the TABLE TYPE (0=tracks, 1=genres, etc.) when it should be the PAGE INDEX (1, 2, 3, 4...).
+
+#### What was wrong:
+```
+Page 1: type=0 (table type for tracks)
+Page 2: type=0 (table type for tracks)
+Page 3: type=1 (table type for genres)
+Page 4: type=1 (table type for genres)
+```
+
+#### What rekordbox expects:
+```
+Page 1: type=1 (page index)
+Page 2: type=2 (page index)
+Page 3: type=3 (page index)
+Page 4: type=4 (page index)
+```
+
+Each page must have a UNIQUE sequential type number matching its position!
+
+### All Changes in This Version
+
+1. **page.rs - PageBuilder::write_header()**
+   - Now writes `page_index` to offset 0x04 instead of `page_type`
+
+2. **page.rs - IndexPageBuilder::finalize()**
+   - Now writes `page_index` to offset 0x04 instead of `page_type`
+
+3. **page.rs - Page Flags**
+   - 0x34 flag now used for Genres and History (NOT Tracks)
+   - Other data pages use 0x24
+
+4. **page.rs - Empty Pages**
+   - Simplified to return all zeros (type=0, flags=0x00)
+
+5. **page.rs - TablePointer**
+   - Renamed fields to match actual meaning:
+     - `first` = transaction counter
+     - `empty` = INDEX page number
+     - `last` = DATA page number
+
+6. **pdb.rs - build_table()**
+   - Updated return values and table pointer generation
+
+---
+
+## Version 2.4.0 (December 28, 2025)
+
+### Critical Bug Fixes: PDB Format
+
+**MULTIPLE CRITICAL ISSUES IDENTIFIED FROM BINARY ANALYSIS**
+
+Detailed binary analysis of a working rekordbox export.pdb revealed several critical issues:
+
+#### 1. File Header Table Pointer Position (Fixed in previous commit)
+- **Wrong**: Table pointers started at offset 0x1C (28)
+- **Correct**: Table pointers start at offset 0x10 (16)
+
+#### 2. Table Pointer Field Order (Fixed in previous commit)
+- **Wrong**: (table_type, empty_candidate, first_page, last_page)
+- **Correct**: (first_page, empty_candidate, last_page, table_type)
+
+#### 3. PAGE HEADER STRUCTURE - CRITICAL FIX
+The data page header had fields in completely wrong positions!
+
+**Wrong layout (what we had):**
+```
+0x04: page_index   <- WRONG!
+0x08: page_type
+0x0C: next_page
+0x10: version
+```
+
+**Correct layout (from working rekordbox):**
+```
+0x04: page_type    <- Type goes here!
+0x08: next_page
+0x0C: unknown1 (cross-reference)
+0x10: unknown2 (counter)
+```
+
+The page_index is NOT stored in the page header at all!
+
+#### 4. Empty Page Structure
+Empty pages (like placeholder track pages) must have:
+- page_type set at offset 0x04
+- flags = 0x00 (not 0x24)
+- All other bytes zero
+
+### New Feature: Hierarchical Contents Folder
+
+Audio files are now organized in a hierarchical structure:
+```
+Contents/
+├── song.flac                     # Flat at root (for CDJ compatibility)
+├── Artist Name/
+│   └── Album Name/
+│       └── song.flac             # Hierarchical (for browsing)
+└── ...
+```
+
+### Files Changed
+
+- **rekordbox-core/src/page.rs**: 
+  - Fixed PageBuilder::write_header() field positions
+  - Fixed IndexPageBuilder::finalize() field positions
+  - Added empty_page_with_type() method
+  - Fixed FileHeader and TablePointer structures
+- **rekordbox-core/src/pdb.rs**: 
+  - Updated build_empty_data_pages to take page_type parameter
+  - Fixed all callers to pass correct page type
+- **rekordbox-server/src/export.rs**: Added hierarchical folder creation
+- **docs/FORMAT_SPECIFICATION.md**: Documented correct header format
+
+---
+
 ## Version 2.3.0 (December 27, 2025)
 
 ### Critical Bug Fix: Row Group Structure

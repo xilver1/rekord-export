@@ -248,16 +248,23 @@ impl PdbBuilder {
         let mut next_page_index = 1u32;
         
         // We'll collect table pointers and build all pages
-        // Each table gets: index page (first_page) + data pages (ending at last_page)
-        // empty_candidate points to after the last data page
+        // Table pointer format: (first=counter, empty=INDEX_page, last=DATA_page, type)
+        
+        // Transaction counter - starts high and we'll decrement
+        let mut transaction_counter = 60u32;  // Arbitrary starting value
         
         // Build all 20 tables in order
         for page_type in PageType::all_types() {
-            let (index_page, data_pages, first_page, last_page, empty_candidate) = 
+            let (index_page, data_pages, index_page_idx, last_data_page) = 
                 self.build_table(*page_type, &mut next_page_index)?;
             
-            // Add table pointer
-            header.add_table(TablePointer::new(*page_type, first_page, last_page, empty_candidate));
+            // Add table pointer with correct field order:
+            // - first: transaction counter
+            // - empty: INDEX page number  
+            // - last: DATA page number (or INDEX if no data)
+            // - type: table type
+            header.add_table(TablePointer::new(*page_type, transaction_counter, index_page_idx, last_data_page));
+            transaction_counter = transaction_counter.wrapping_sub(1);
             
             // Add pages
             all_pages.push(index_page);
@@ -266,7 +273,6 @@ impl PdbBuilder {
         
         // Update header with final page count
         header.next_unused_page = next_page_index;
-        header.sequence = next_page_index; // Sequence tracks total writes
         all_pages[0] = header.to_page();
         
         // Flatten to single buffer
@@ -279,8 +285,8 @@ impl PdbBuilder {
     }
     
     /// Build a single table (index page + data pages)
-    /// Returns: (index_page, data_pages, first_page, last_page, empty_candidate)
-    fn build_table(&self, page_type: PageType, next_idx: &mut u32) -> Result<(Vec<u8>, Vec<Vec<u8>>, u32, u32, u32)> {
+    /// Returns: (index_page, data_pages, index_page_idx, last_data_page_idx)
+    fn build_table(&self, page_type: PageType, next_idx: &mut u32) -> Result<(Vec<u8>, Vec<Vec<u8>>, u32, u32)> {
         let index_page_idx = *next_idx;
         *next_idx += 1;
         
@@ -307,25 +313,36 @@ impl PdbBuilder {
             _ => self.build_empty_data_pages(next_idx)?,
         };
         
+        // Extract num_row_offsets from last data page for active tables
+        // This is stored in the packed field at 0x18-0x1A, bits 11+
+        let num_row_offsets = if has_data && !data_pages.is_empty() {
+            let last_page = data_pages.last().unwrap();
+            let packed = (last_page[0x18] as u32) 
+                | ((last_page[0x19] as u32) << 8) 
+                | ((last_page[0x1A] as u32) << 16);
+            packed >> 11  // num_row_offsets is in upper bits
+        } else {
+            0
+        };
+        
         // Build index page
         let index_page = IndexPageBuilder::new(index_page_idx, page_type)
-            .finalize(data_page_idx, has_data);
+            .finalize(data_page_idx, has_data, num_row_offsets);
         
-        // Calculate pointers
-        let first_page = index_page_idx;
-        let last_page = if has_data && !data_pages.is_empty() {
-            // last_page is the last DATA page index
+        // Calculate last_data_page
+        // For empty tables, last == index (same page)
+        // For tables with data, last = last DATA page index
+        let last_data_page = if has_data && !data_pages.is_empty() {
             data_page_idx + (data_pages.len() as u32) - 1
         } else {
-            // For empty tables, last_page equals index page (per rex)
-            index_page_idx
+            index_page_idx  // Empty tables: last == index
         };
-        let empty_candidate = *next_idx;
         
-        Ok((index_page, data_pages, first_page, last_page, empty_candidate))
+        Ok((index_page, data_pages, index_page_idx, last_data_page))
     }
     
     /// Build empty data page (for tables with no content)
+    /// Empty pages are completely zeros in rekordbox format
     fn build_empty_data_pages(&self, next_idx: &mut u32) -> Result<(Vec<Vec<u8>>, bool)> {
         *next_idx += 1;
         Ok((vec![PageBuilder::empty_page()], false))
@@ -646,9 +663,51 @@ impl PdbBuilder {
     }
     
     /// Build columns data pages (type 16)
-    /// Kaitai spec says "TODO figure out and explain" - leave empty for safety
+    /// Contains column name metadata required by rekordbox
     fn build_columns_data_pages(&self, next_idx: &mut u32) -> Result<(Vec<Vec<u8>>, bool)> {
-        self.build_empty_data_pages(next_idx)
+        let mut pages: Vec<Vec<u8>> = Vec::new();
+        let mut current_page = PageBuilder::new(*next_idx, PageType::Columns);
+        *next_idx += 1;
+        
+        // Column metadata extracted from rekordbox 6.8 export
+        // Format: id(u2) + subtype(u2) + name(DeviceSQL UTF-16LE string)
+        // The subtype appears to be 0x80 + column_id
+        let columns_data: &[&[u8]] = &[
+            &[1, 0, 128, 0, 144, 18, 0, 0, 250, 255, 71, 0, 69, 0, 78, 0, 82, 0, 69, 0, 251, 255, 0, 0],  // GENRE
+            &[2, 0, 129, 0, 144, 20, 0, 0, 250, 255, 65, 0, 82, 0, 84, 0, 73, 0, 83, 0, 84, 0, 251, 255],  // ARTIST
+            &[3, 0, 130, 0, 144, 18, 0, 0, 250, 255, 65, 0, 76, 0, 66, 0, 85, 0, 77, 0, 251, 255, 0, 0],  // ALBUM
+            &[4, 0, 131, 0, 144, 18, 0, 0, 250, 255, 84, 0, 82, 0, 65, 0, 67, 0, 75, 0, 251, 255, 0, 0],  // TRACK
+            &[5, 0, 133, 0, 144, 14, 0, 0, 250, 255, 66, 0, 80, 0, 77, 0, 251, 255, 0, 0],  // BPM
+            &[6, 0, 134, 0, 144, 20, 0, 0, 250, 255, 82, 0, 65, 0, 84, 0, 73, 0, 78, 0, 71, 0, 251, 255],  // RATING
+            &[7, 0, 135, 0, 144, 16, 0, 0, 250, 255, 89, 0, 69, 0, 65, 0, 82, 0, 251, 255],  // YEAR
+            &[8, 0, 136, 0, 144, 22, 0, 0, 250, 255, 82, 0, 69, 0, 77, 0, 73, 0, 88, 0, 69, 0, 82, 0, 251, 255, 0, 0],  // REMIXER
+            &[9, 0, 137, 0, 144, 18, 0, 0, 250, 255, 76, 0, 65, 0, 66, 0, 69, 0, 76, 0, 251, 255, 0, 0],  // LABEL
+            &[10, 0, 138, 0, 144, 38, 0, 0, 250, 255, 79, 0, 82, 0, 73, 0, 71, 0, 73, 0, 78, 0, 65, 0, 76, 0, 32, 0, 65, 0, 82, 0, 84, 0, 73, 0, 83, 0, 84, 0, 251, 255, 0, 0],  // ORIGINAL ARTIST
+            &[11, 0, 139, 0, 144, 14, 0, 0, 250, 255, 75, 0, 69, 0, 89, 0, 251, 255, 0, 0],  // KEY
+            &[12, 0, 141, 0, 144, 14, 0, 0, 250, 255, 67, 0, 85, 0, 69, 0, 251, 255, 0, 0],  // CUE
+            &[13, 0, 142, 0, 144, 18, 0, 0, 250, 255, 67, 0, 79, 0, 76, 0, 79, 0, 82, 0, 251, 255, 0, 0],  // COLOR
+            &[14, 0, 146, 0, 144, 16, 0, 0, 250, 255, 84, 0, 73, 0, 77, 0, 69, 0, 251, 255],  // TIME
+            &[15, 0, 147, 0, 144, 22, 0, 0, 250, 255, 66, 0, 73, 0, 84, 0, 82, 0, 65, 0, 84, 0, 69, 0, 251, 255, 0, 0],  // BITRATE
+            &[16, 0, 148, 0, 144, 26, 0, 0, 250, 255, 70, 0, 73, 0, 76, 0, 69, 0, 32, 0, 78, 0, 65, 0, 77, 0, 69, 0, 251, 255, 0, 0],  // FILE NAME
+            &[17, 0, 132, 0, 144, 24, 0, 0, 250, 255, 80, 0, 76, 0, 65, 0, 89, 0, 76, 0, 73, 0, 83, 0, 84, 0, 251, 255],  // PLAYLIST
+            &[18, 0, 152, 0, 144, 32, 0, 0, 250, 255, 72, 0, 79, 0, 84, 0, 32, 0, 67, 0, 85, 0, 69, 0, 32, 0, 66, 0, 65, 0, 78, 0, 75, 0, 251, 255],  // HOT CUE BANK
+            &[19, 0, 149, 0, 144, 22, 0, 0, 250, 255, 72, 0, 73, 0, 83, 0, 84, 0, 79, 0, 82, 0, 89, 0, 251, 255, 0, 0],  // HISTORY
+            &[20, 0, 145, 0, 144, 20, 0, 0, 250, 255, 83, 0, 69, 0, 65, 0, 82, 0, 67, 0, 72, 0, 251, 255],  // SEARCH
+            &[21, 0, 150, 0, 144, 24, 0, 0, 250, 255, 67, 0, 79, 0, 77, 0, 77, 0, 69, 0, 78, 0, 84, 0, 83, 0, 251, 255],  // COMMENTS
+            &[22, 0, 140, 0, 144, 28, 0, 0, 250, 255, 68, 0, 65, 0, 84, 0, 69, 0, 32, 0, 65, 0, 68, 0, 68, 0, 69, 0, 68, 0, 251, 255],  // DATE ADDED
+            &[23, 0, 151, 0, 144, 34, 0, 0, 250, 255, 68, 0, 74, 0, 32, 0, 80, 0, 76, 0, 65, 0, 89, 0, 32, 0, 67, 0, 79, 0, 85, 0, 78, 0, 84, 0, 251, 255, 0, 0],  // DJ PLAY COUNT
+            &[24, 0, 144, 0, 144, 20, 0, 0, 250, 255, 70, 0, 79, 0, 76, 0, 68, 0, 69, 0, 82, 0, 251, 255],  // FOLDER
+            &[25, 0, 161, 0, 144, 22, 0, 0, 250, 255, 68, 0, 69, 0, 70, 0, 65, 0, 85, 0, 76, 0, 84, 0, 251, 255, 0, 0],  // DEFAULT
+            &[26, 0, 162, 0, 144, 24, 0, 0, 250, 255, 65, 0, 76, 0, 80, 0, 72, 0, 65, 0, 66, 0, 69, 0, 84, 0, 251, 255],  // ALPHABET
+            &[27, 0, 170, 0, 144, 24, 0, 0, 250, 255, 77, 0, 65, 0, 84, 0, 67, 0, 72, 0, 73, 0, 78, 0, 71, 0, 251, 255],  // MATCHING
+        ];
+        
+        for row in columns_data {
+            current_page.write_row(row)?;
+        }
+        
+        pages.push(current_page.finalize(0xFFFFFFFF));
+        Ok((pages, true))
     }
     
     /// Build unknown17 data pages (type 17, uk17 in Kaitai spec)
@@ -658,9 +717,9 @@ impl PdbBuilder {
         let mut current_page = PageBuilder::new(*next_idx, PageType::Unknown17);
         *next_idx += 1;
         
-        // Static dataset from rex project, converted to u32 as per Kaitai spec
-        // Each row is 4 x u32 = 16 bytes
-        let dataset: &[(u32, u32, u32, u32)] = &[
+        // Static dataset from rekordbox binary analysis
+        // ACTUAL format: 4 x u16 = 8 bytes per row (NOT u32!)
+        let dataset: &[(u16, u16, u16, u16)] = &[
             (0x1, 0x1, 0x163, 0x0),
             (0x5, 0x6, 0x105, 0x0),
             (0x6, 0x7, 0x163, 0x0),
@@ -686,7 +745,7 @@ impl PdbBuilder {
         ];
         
         for &(u1, u2, u3, u4) in dataset {
-            let mut row = Vec::with_capacity(16);
+            let mut row = Vec::with_capacity(8);
             row.extend_from_slice(&u1.to_le_bytes());
             row.extend_from_slice(&u2.to_le_bytes());
             row.extend_from_slice(&u3.to_le_bytes());
@@ -699,15 +758,81 @@ impl PdbBuilder {
     }
     
     /// Build unknown18 data pages (type 18)
-    /// Not defined in Kaitai spec - leave empty for safety
+    /// Contains mapping/configuration data required by rekordbox
+    /// Format: 4 x u16 = 8 bytes per row
     fn build_unknown18_data_pages(&self, next_idx: &mut u32) -> Result<(Vec<Vec<u8>>, bool)> {
-        self.build_empty_data_pages(next_idx)
+        let mut pages: Vec<Vec<u8>> = Vec::new();
+        let mut current_page = PageBuilder::new(*next_idx, PageType::Unknown18);
+        *next_idx += 1;
+        
+        // System mapping data extracted from rekordbox 6.8 export
+        let unknown18_data: &[(u16, u16, u16, u16)] = &[
+            (1, 6, 1, 0),
+            (21, 7, 1, 0),
+            (14, 8, 1, 0),
+            (8, 9, 1, 0),
+            (9, 10, 1, 0),
+            (10, 11, 1, 0),
+            (15, 13, 1, 0),
+            (13, 15, 1, 0),
+            (23, 16, 1, 0),
+            (22, 17, 1, 0),
+            (25, 0, 256, 0),
+            (26, 1, 512, 0),
+            (2, 2, 768, 0),
+            (3, 3, 1024, 0),
+            (5, 4, 1280, 0),
+            (6, 5, 1536, 0),
+            (11, 12, 1792, 0),
+        ];
+        
+        for &(u1, u2, u3, u4) in unknown18_data {
+            let mut row = Vec::with_capacity(8);
+            row.extend_from_slice(&u1.to_le_bytes());
+            row.extend_from_slice(&u2.to_le_bytes());
+            row.extend_from_slice(&u3.to_le_bytes());
+            row.extend_from_slice(&u4.to_le_bytes());
+            current_page.write_row(&row)?;
+        }
+        
+        pages.push(current_page.finalize(0xFFFFFFFF));
+        Ok((pages, true))
     }
     
     /// Build history data pages (type 19)
-    /// This table helps rekordbox sync history playlists
+    /// Contains sync metadata required by rekordbox
     fn build_history_data_pages(&self, next_idx: &mut u32) -> Result<(Vec<Vec<u8>>, bool)> {
-        self.build_empty_data_pages(next_idx)
+        let mut pages: Vec<Vec<u8>> = Vec::new();
+        let mut current_page = PageBuilder::new(*next_idx, PageType::History);
+        *next_idx += 1;
+        
+        // History/sync metadata row extracted from rekordbox 6.8 export
+        // 40 bytes total:
+        // [0-1]: 0x0280 (subtype/flags, little-endian)
+        // [2-11]: zeros (10 bytes padding)
+        // [12]: 0x17 (23 = string section length)
+        // [13-22]: "2025-01-01" (date in ASCII, 10 bytes)
+        // [23-24]: 0x191E (additional data, little-endian)
+        // [25]: 0x0B (11 = marker/length)
+        // [26-29]: "1000" (version string in ASCII)
+        // [30]: 0x03 (DeviceSQL string marker)
+        // [31-39]: zeros (9 bytes padding)
+        let history_row: [u8; 40] = [
+            0x80, 0x02,  // subtype
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // padding
+            0x17,  // string section length (23)
+            b'2', b'0', b'2', b'5', b'-', b'0', b'1', b'-', b'0', b'1',  // date "2025-01-01"
+            0x19, 0x1E,  // additional timestamp data
+            0x0B,  // marker (11)
+            b'1', b'0', b'0', b'0',  // version "1000"
+            0x03,  // DeviceSQL marker
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // padding
+        ];
+        
+        current_page.write_row(&history_row)?;
+        
+        pages.push(current_page.finalize(0xFFFFFFFF));
+        Ok((pages, true))
     }
     
     /// Build a single track row
@@ -767,8 +892,9 @@ impl PdbBuilder {
         // 0x02-0x03: index_shift
         row.extend_from_slice(&0u16.to_le_bytes());
         
-        // 0x04-0x07: bitmask
-        row.extend_from_slice(&0u32.to_le_bytes());
+        // 0x04-0x07: bitmask (controls string field presence)
+        // Value 0x000C0700 is standard for rekordbox 6.x tracks
+        row.extend_from_slice(&0x000C0700u32.to_le_bytes());
         
         // 0x08-0x0B: sample_rate
         row.extend_from_slice(&analysis.sample_rate.to_le_bytes());
@@ -1003,13 +1129,16 @@ impl PdbBuilder {
     /// - bytes 0x08+: name (DeviceSQL string)
     fn build_color_row(&self, id: u32, name: &str) -> Vec<u8> {
         let mut row = Vec::new();
-        // unknown1 (5 bytes)
-        row.extend_from_slice(&[0u8; 5]);
-        // id (2 bytes) - color id is actually 16-bit
-        row.extend_from_slice(&(id as u16).to_le_bytes());
-        // u3 (1 byte)
-        row.push(0);
-        // name (DeviceSQL string)
+        // Actual structure from rekordbox binary analysis:
+        // - bytes 0-3: zeros (4 bytes)
+        // - byte 4: u2 = color id (MUST equal byte 5)
+        // - byte 5: id = color id
+        // - bytes 6-7: zeros (2 bytes)
+        // - bytes 8+: name (DeviceSQL string)
+        row.extend_from_slice(&[0u8; 4]);  // 4 zeros
+        row.push(id as u8);                 // byte 4: u2 = id
+        row.push(id as u8);                 // byte 5: id
+        row.extend_from_slice(&[0u8; 2]);  // 2 zeros
         row.extend_from_slice(&encode_string(name));
         row
     }
